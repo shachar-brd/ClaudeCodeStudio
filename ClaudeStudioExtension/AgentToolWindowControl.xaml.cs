@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
@@ -80,7 +80,7 @@ public partial class AgentToolWindowControl : UserControl
         AgentToolWindowCommand.ActiveControl = this;
 
         // One-shot cleanup of stale pasted images/files. Runs once per VS
-        // session in the background — these files accumulate in %TEMP%/ClaudeStudio
+        // session in the background â€” these files accumulate in %TEMP%/ClaudeStudio
         // without expiry (every Ctrl+V of an image or binary file drops one),
         // so screenshots of Snipping Tool at ~300KB each can pile up to MB
         // over weeks. 7 days is a comfortable retention.
@@ -104,7 +104,7 @@ public partial class AgentToolWindowControl : UserControl
                     if (File.GetLastWriteTimeUtc(file) < cutoff)
                         File.Delete(file);
                 }
-                catch { /* file locked or already gone — ignore */ }
+                catch { /* file locked or already gone â€” ignore */ }
             }
         }
         catch (Exception ex)
@@ -241,8 +241,8 @@ public partial class AgentToolWindowControl : UserControl
 
         VSColorTheme.ThemeChanged += OnVsThemeChanged;
 
-        // Build errors → agent: watch build completion so failing builds can be
-        // sent to the chat (the webview decides — opt-in setting lives there).
+        // Build errors â†’ agent: watch build completion so failing builds can be
+        // sent to the chat (the webview decides â€” opt-in setting lives there).
 #pragma warning disable VSTHRD010 // Loaded continuation stays on the UI thread
         try
         {
@@ -257,7 +257,7 @@ public partial class AgentToolWindowControl : UserControl
 #pragma warning restore VSTHRD010
     }
 
-    // ── Build errors → agent (D11) ────────────────────────────────────────
+    // â”€â”€ Build errors â†’ agent (D11) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     // When a Build/Rebuild finishes, a cheap LastBuildInfo check gates reading
     // the Error List: green builds only post errorCount 0 (the webview uses it
     // to reset its auto-send dedupe), failing builds post the formatted prompt.
@@ -342,7 +342,7 @@ public partial class AgentToolWindowControl : UserControl
             var prevSignedIn = _lastSignedInStatus;
             _lastSignedInStatus = nowSignedIn;
 
-            // Browser is a WPF control — touching it from a threadpool thread
+            // Browser is a WPF control â€” touching it from a threadpool thread
             // (watcher debounce timer, IsVisibleChanged Task.Run) throws
             // "calling thread cannot access this object". Marshal everything
             // that touches Browser to the UI thread.
@@ -414,7 +414,7 @@ public partial class AgentToolWindowControl : UserControl
 
             // Trust gate: if a workspace is open and not yet trusted, prompt the
             // user before the agent does anything in it. Skipped when there's no
-            // workspace (cwd null) — UserProfile fallback isn't covered by trust.
+            // workspace (cwd null) â€” UserProfile fallback isn't covered by trust.
             var workspaceTrusted = string.IsNullOrEmpty(cwd) || Trust.TrustedWorkspacesStore.IsTrusted(cwd);
             if (!workspaceTrusted)
             {
@@ -431,12 +431,12 @@ public partial class AgentToolWindowControl : UserControl
                     Browser.CoreWebView2.PostWebMessageAsJson(
                         JsonSerializer.Serialize(new { type = "workspace-trusted", path = cwd })));
 
-                // Only scan MCPs once the workspace is past the gate — chaining
+                // Only scan MCPs once the workspace is past the gate â€” chaining
                 // both modals at once would be confusing.
                 SendMcpTrustCheck(cwd);
             }
 
-            // Retry if we got nothing — Open Folder may still be initializing.
+            // Retry if we got nothing â€” Open Folder may still be initializing.
             // Two retries (3s then 5s) cover slow disks without spamming.
             if (cwd == null && retryAttempt < 2)
             {
@@ -466,7 +466,7 @@ public partial class AgentToolWindowControl : UserControl
     }
 
     // Exact match against %USERPROFILE%. Subfolders (e.g. C:\Users\was\source\repos\Foo)
-    // are real workspaces and go through the normal trust flow — trusting the root
+    // are real workspaces and go through the normal trust flow â€” trusting the root
     // would wide-trust everything under home due to prefix matching in IsTrusted.
     // Used by: the no-workspace send block, and IsBlockedRoot below.
     private static bool IsHomeDirectory(string? path)
@@ -505,7 +505,7 @@ public partial class AgentToolWindowControl : UserControl
         catch { return false; }
     }
 
-    // Used to suppress the "Trust parent" button — escalating to any of these
+    // Used to suppress the "Trust parent" button â€” escalating to any of these
     // roots via the parent shortcut would re-introduce the wide-trust trap.
     private static bool IsBlockedRoot(string? path) =>
         IsHomeDirectory(path) || IsDriveRoot(path) || IsUsersContainer(path);
@@ -513,7 +513,7 @@ public partial class AgentToolWindowControl : UserControl
     // Returns a key describing why a path is high-risk, or null when it's a
     // regular folder. Used by the UI to render a contextual warning banner
     // inside the trust modal (home is blocked upstream, so it's not surfaced
-    // here — the user gets the no-workspace card instead).
+    // here â€” the user gets the no-workspace card instead).
     private static string? GetRiskWarning(string? path)
     {
         if (IsDriveRoot(path)) return "drive-root";
@@ -638,7 +638,7 @@ public partial class AgentToolWindowControl : UserControl
                 accountDisplayName = TryGetString(acct, "displayName");
             }
 
-            // No oauthAccount object — treat as signed out (CLI hasn't logged in yet).
+            // No oauthAccount object â€” treat as signed out (CLI hasn't logged in yet).
             if (organizationName == null && email == null && accountDisplayName == null)
                 return isGateway ? GatewayInfo() : new { type = "account-info", signedIn = false };
 
@@ -716,14 +716,14 @@ public partial class AgentToolWindowControl : UserControl
         System.Windows.RoutedEventArgs e)
     {
         VSColorTheme.ThemeChanged -= OnVsThemeChanged;
-        // Intentionally NOT calling StopClaudeJsonWatcher() — Unloaded fires on
+        // Intentionally NOT calling StopClaudeJsonWatcher() â€” Unloaded fires on
         // tool window tab switches, but Loaded is guarded by _initialized so the
         // watcher would never restart. Keep it alive for the control's lifetime.
     }
 
     // U4: watches the CLI's live presence files (~/.claude/sessions/*.json)
     // for status/waitingFor changes and forwards them to the webview. The pid
-    // the agent hands us is the process it spawned — under a shim install
+    // the agent hands us is the process it spawned â€” under a shim install
     // (chocolatey) that is NOT the pid the real CLI stamps on its presence
     // file, so events are matched by the file's sessionId (or pid, when they
     // do agree) instead of watching one fixed filename (bloco 20, validation
@@ -739,14 +739,14 @@ public partial class AgentToolWindowControl : UserControl
         {
             _presenceWatcher?.Dispose();
             _presenceWatcher = null;
-            // New spawn, clean slate — a dedupe carried across respawns could
+            // New spawn, clean slate â€” a dedupe carried across respawns could
             // swallow the first post if the state happens to repeat.
             _lastPresencePosted = "";
             _presenceClaudePid = pid;
             _presenceMatchedFile = null;
 
             var dir = Path.Combine(ClaudePaths.ConfigDir, "sessions");
-            if (!Directory.Exists(dir)) return; // pre-presence-file CLI — feature just stays off
+            if (!Directory.Exists(dir)) return; // pre-presence-file CLI â€” feature just stays off
 
             _presenceWatcher = new FileSystemWatcher(dir, "*.json")
             {
@@ -800,13 +800,13 @@ public partial class AgentToolWindowControl : UserControl
             var waitingFor = root.TryGetProperty("waitingFor", out var w) ? w.GetString() ?? "" : "";
             PostPresence(status, waitingFor);
         }
-        catch { /* mid-write or gone — next event retries */ }
+        catch { /* mid-write or gone â€” next event retries */ }
     }
 
     private void PostPresence(string status, string waitingFor)
     {
         var payload = status + "|" + waitingFor;
-        if (payload == _lastPresencePosted) return; // events fire in bursts — dedupe
+        if (payload == _lastPresencePosted) return; // events fire in bursts â€” dedupe
         _lastPresencePosted = payload;
         try
         {
@@ -838,7 +838,7 @@ public partial class AgentToolWindowControl : UserControl
 
             _lastSignedInStatus = IsSignedIn();
 
-            // Watch the whole user-profile dir without a Filter — the CLI may
+            // Watch the whole user-profile dir without a Filter â€” the CLI may
             // write via temp+rename, delete+recreate, or in-place, and filter
             // patterns on dot-prefixed names have been unreliable. We re-check
             // the FullPath inside the handler instead.
@@ -935,7 +935,7 @@ public partial class AgentToolWindowControl : UserControl
 
     // Watches %APPDATA%/ClaudeStudio/trusted-workspaces.json so the trust gate
     // refreshes when the file is edited externally (another VS instance, manual
-    // edit, sync tool). Mirrors StartClaudeJsonWatcher 1:1 — same long-lived
+    // edit, sync tool). Mirrors StartClaudeJsonWatcher 1:1 â€” same long-lived
     // pattern, same broad NotifyFilter, same FullPath equality check.
     private void StartTrustedWorkspacesWatcher()
     {
@@ -1031,7 +1031,7 @@ public partial class AgentToolWindowControl : UserControl
             _trustedWorkspacesDebounceTimer = new System.Threading.Timer(
                 _ =>
                 {
-                    // SendCwdInfo touches DTE (Package.GetGlobalService) — must run
+                    // SendCwdInfo touches DTE (Package.GetGlobalService) â€” must run
                     // on the UI thread. Dispatch from the threadpool callback.
                     // SendTrustedWorkspacesList keeps the management modal in sync
                     // if it's currently open (cheap no-op if it isn't).
@@ -1099,11 +1099,11 @@ public partial class AgentToolWindowControl : UserControl
             {
                 FileName = "cmd.exe",
                 // /S: with the whole command re-quoted, cmd strips only the
-                // outer quotes — required once exe can be a path with spaces.
+                // outer quotes â€” required once exe can be a path with spaces.
                 //
                 // `auth login` with `login` as fallback: 2.1.226 moved sign-in
                 // under an `auth` subcommand and dropped the bare `login`, which
-                // then parses as a *prompt* — the CLI opens a session and asks
+                // then parses as a *prompt* â€” the CLI opens a session and asks
                 // the user what they meant by "login" (rodada 16, 47.1). Older
                 // CLIs reject `auth` with a non-zero exit, so `||` picks the old
                 // spelling for them. (If the user aborts a working `auth login`,
@@ -1118,7 +1118,7 @@ public partial class AgentToolWindowControl : UserControl
             // The watcher only fires when oauthAccount *appears*, so re-running
             // login while already signed in never changes the file and the overlay
             // waits forever (rodada 15, item 42.2). Closing the terminal is the
-            // other end of that flow, so treat it as "done" too — whichever comes
+            // other end of that flow, so treat it as "done" too â€” whichever comes
             // first wins, and closeSigninOverlay is idempotent.
             if (loginProc != null)
             {
@@ -1149,14 +1149,14 @@ public partial class AgentToolWindowControl : UserControl
     }
 
     // #10: runs `claude doctor` non-interactively and captures its output for
-    // the ⌘ menu's card, instead of opening a visible window like
+    // the âŒ˜ menu's card, instead of opening a visible window like
     // StartClaudeLogin above (there the user needs to see/complete an OAuth
     // flow; here we just want the report). Same cliPath ?? "claude" fallback
-    // as StartClaudeLogin — relies on PATH when no CLI path is configured.
+    // as StartClaudeLogin â€” relies on PATH when no CLI path is configured.
     private static async Task<(string? output, string? error)> RunDoctorAsync(string? cliPath)
     {
         // net472 has no ProcessStartInfo.ArgumentList / Process.WaitForExitAsync /
-        // cancellable ReadToEndAsync (those are net5+ only) — times out via
+        // cancellable ReadToEndAsync (those are net5+ only) â€” times out via
         // Task.WhenAny + Task.Delay instead, killing the process on timeout so
         // the abandoned read tasks unblock (pipes close under them).
         Process? proc = null;
@@ -1175,7 +1175,7 @@ public partial class AgentToolWindowControl : UserControl
             };
             proc = Process.Start(psi);
             if (proc == null) return (null, "failed to start claude doctor");
-            proc.StandardInput.Close(); // doctor shouldn't need stdin — avoid it ever blocking on a read
+            proc.StandardInput.Close(); // doctor shouldn't need stdin â€” avoid it ever blocking on a read
 
             var stdoutTask = proc.StandardOutput.ReadToEndAsync();
             var stderrTask = proc.StandardError.ReadToEndAsync();
@@ -1254,7 +1254,7 @@ public partial class AgentToolWindowControl : UserControl
             {
                 OutputLog.Info("ui: clear");
                 await _agentClient.StopAsync();
-                // New chat — drop the dead session's id so the watcher, title,
+                // New chat â€” drop the dead session's id so the watcher, title,
                 // branch and rewind can't target it anymore (rodada 12).
                 _agentClient.ResetSession();
                 _sessionStart = DateTime.Now;
@@ -1289,7 +1289,7 @@ public partial class AgentToolWindowControl : UserControl
                     trustDispatcher.Invoke(() =>
                         Browser.CoreWebView2.PostWebMessageAsJson(
                             JsonSerializer.Serialize(new { type = "workspace-trusted", path = request.Path })));
-                    // Workspace just cleared the gate — surface any pending MCP servers now.
+                    // Workspace just cleared the gate â€” surface any pending MCP servers now.
                     SendMcpTrustCheck(currentSolutionDir);
                 }
                 return;
@@ -1469,7 +1469,7 @@ public partial class AgentToolWindowControl : UserControl
                     // JSONL as the same custom-title line claude writes for --name /
                     // TUI renames, so the terminal /resume picker shows it too.
                     // rename_session over stdio is unsupported (2.1.144), hence the
-                    // direct append — but never while that session is streaming
+                    // direct append â€” but never while that session is streaming
                     // (claude is appending to the same file). Clearing a title only
                     // touches the sidecar; the stale native line loses to it anyway.
                     if (!string.IsNullOrWhiteSpace(request.Title) &&
@@ -1670,7 +1670,7 @@ public partial class AgentToolWindowControl : UserControl
                     if (request.Text == "attention") System.Media.SystemSounds.Exclamation.Play();
                     else System.Media.SystemSounds.Asterisk.Play();
                 }
-                catch { /* audio device unavailable — ignore */ }
+                catch { /* audio device unavailable â€” ignore */ }
                 return;
             }
 
@@ -1761,7 +1761,7 @@ public partial class AgentToolWindowControl : UserControl
                 return;
             }
 
-            // Trust gate (defense-in-depth — the boot-time prompt already covers the
+            // Trust gate (defense-in-depth â€” the boot-time prompt already covers the
             // common case, but a stale UI / cleared settings could let an untrusted
             // send slip through). Block before spawning the agent.
             if (!string.IsNullOrEmpty(workingDir) && !Trust.TrustedWorkspacesStore.IsTrusted(workingDir))
@@ -1780,7 +1780,7 @@ public partial class AgentToolWindowControl : UserControl
                 return;
             }
 
-            // MCP trust gate — surface enabled servers the user hasn't approved (or
+            // MCP trust gate â€” surface enabled servers the user hasn't approved (or
             // whose payload changed) before spawning the agent. The user marks which
             // ones to trust; sending again proceeds normally.
             var pendingMcp = CollectUntrustedMcpServers(workingDir);
@@ -1826,7 +1826,7 @@ public partial class AgentToolWindowControl : UserControl
 
             if (!string.Equals(workingDir, _lastWorkingDir, StringComparison.OrdinalIgnoreCase))
             {
-                OutputLog.Info($"working dir changed: {_lastWorkingDir ?? "-"} → {workingDir ?? "-"} (restarting agent)");
+                OutputLog.Info($"working dir changed: {_lastWorkingDir ?? "-"} â†’ {workingDir ?? "-"} (restarting agent)");
                 await _agentClient.StopAsync();
                 _lastWorkingDir = workingDir;
             }
@@ -1835,7 +1835,7 @@ public partial class AgentToolWindowControl : UserControl
 
             VsStatusBar.ShowThinking();
 
-            // Explicit CLI path (D7) — attached to every outbound request; a
+            // Explicit CLI path (D7) â€” attached to every outbound request; a
             // change respawns claude via the session key on the agent side.
             _agentClient.CliPath = string.IsNullOrWhiteSpace(request.CliPath) ? null : request.CliPath.Trim();
 
@@ -1849,13 +1849,13 @@ public partial class AgentToolWindowControl : UserControl
                 PermissionAllow = request.PermissionAllow,
                 PermissionAsk = request.PermissionAsk,
                 PermissionDeny = request.PermissionDeny,
-                // Omitted by older payloads → 0 → wait for the answer.
+                // Omitted by older payloads â†’ 0 â†’ wait for the answer.
                 PermissionTimeoutMinutes = request.PermissionTimeoutMinutes ?? 0
             };
 
             // IDE selection context (V11): when the user has text highlighted in
             // the active editor, attach it to the outgoing message in
-            // <ide_selection> tags. Only what claude receives changes — the user
+            // <ide_selection> tags. Only what claude receives changes â€” the user
             // bubble was already rendered from the typed text.
             var ideSelection = await CaptureIdeSelectionAsync(workingDir);
 
@@ -1940,7 +1940,7 @@ public partial class AgentToolWindowControl : UserControl
             {
                 Browser.CoreWebView2.PostWebMessageAsJson(
                     JsonSerializer.Serialize(new { type = "stream-done" }));
-                // Refresh Usage now — at this point claude.exe has flushed the
+                // Refresh Usage now â€” at this point claude.exe has flushed the
                 // assistant turn to JSONL, so the gated count (assistantTurns > 0)
                 // picks up the new session. Doing this on `session` (init) fires
                 // too early, before any turn has been written.
@@ -1951,7 +1951,7 @@ public partial class AgentToolWindowControl : UserControl
             // with no stored title, ask claude for a short generated one
             // (fire-and-forget; the History picks it up on its next open).
             // Resumed pre-feature sessions get a title here too. Uses the typed
-            // text only — the ide_selection block would pollute the summary.
+            // text only â€” the ide_selection block would pollute the summary.
             var titleSessionId = _agentClient.CurrentSessionId;
             if (!string.IsNullOrEmpty(titleSessionId) && !SessionTitlesStore.HasEntry(titleSessionId!))
             {
@@ -2009,7 +2009,7 @@ public partial class AgentToolWindowControl : UserControl
 
         if (string.IsNullOrEmpty(content))
         {
-            VsStatusBar.SetText("Nothing to export — chat is empty.");
+            VsStatusBar.SetText("Nothing to export â€” chat is empty.");
             return;
         }
 
@@ -2068,10 +2068,10 @@ public partial class AgentToolWindowControl : UserControl
 #pragma warning disable VSTHRD010
     /// <summary>
     /// Workspace-only resolver: returns the path of a loaded .sln or Open Folder,
-    /// or null. Does NOT fall through to ActiveDocument or UserProfile — those
+    /// or null. Does NOT fall through to ActiveDocument or UserProfile â€” those
     /// are agent-cwd fallbacks, not "current workspace" signals. Used by features
     /// that filter by project (history dropdown, Usage panel) so null cleanly
-    /// means "no current workspace → show all".
+    /// means "no current workspace â†’ show all".
     /// </summary>
     public static string? ResolveWorkspaceCwd(EnvDTE.DTE? dte)
     {
@@ -2081,7 +2081,7 @@ public partial class AgentToolWindowControl : UserControl
             if (!string.IsNullOrEmpty(solutionPath))
             {
                 // Open Folder mode: Solution.FullName is the folder itself, not a
-                // .sln file — applying Path.GetDirectoryName would jump up one level.
+                // .sln file â€” applying Path.GetDirectoryName would jump up one level.
                 if (Directory.Exists(solutionPath))
                     return solutionPath;
                 if (File.Exists(solutionPath))
@@ -2117,7 +2117,7 @@ public partial class AgentToolWindowControl : UserControl
             if (!string.IsNullOrEmpty(solutionPath))
             {
                 // Open Folder mode: Solution.FullName is the folder itself, not a
-                // .sln file — applying Path.GetDirectoryName would jump up one level.
+                // .sln file â€” applying Path.GetDirectoryName would jump up one level.
                 if (Directory.Exists(solutionPath))
                 {
                     OutputLog.Info($"cwd resolved via Solution.FullName (folder): {solutionPath}");
@@ -2136,7 +2136,7 @@ public partial class AgentToolWindowControl : UserControl
         }
         catch { }
 
-        // 2. Open Folder mode — VS exposes the folder via IVsSolution.GetSolutionInfo
+        // 2. Open Folder mode â€” VS exposes the folder via IVsSolution.GetSolutionInfo
         try
         {
             var vsSolution = Package.GetGlobalService(typeof(SVsSolution)) as IVsSolution;
@@ -2300,7 +2300,7 @@ public partial class AgentToolWindowControl : UserControl
             {
                 OutputLog.Warn("apply-to-editor: no active document");
                 Browser.CoreWebView2.PostWebMessageAsJson(
-                    JsonSerializer.Serialize(new { type = "toast", text = "No active editor — open a file first." }));
+                    JsonSerializer.Serialize(new { type = "toast", text = "No active editor â€” open a file first." }));
                 return;
             }
 
@@ -2324,7 +2324,7 @@ public partial class AgentToolWindowControl : UserControl
 
     // Runs the user-configured status line command (V17) in the working
     // directory and posts the trimmed output back to the webview. The command
-    // is the user's own setting — same trust model as claude running in that
+    // is the user's own setting â€” same trust model as claude running in that
     // (already trust-gated) folder.
     private async Task HandleRunStatusLineAsync(string? command, string? workingDir)
     {
@@ -2353,11 +2353,11 @@ public partial class AgentToolWindowControl : UserControl
                 if (!proc.WaitForExit(5000)) { try { proc.Kill(); } catch { } return ""; }
                 if (proc.ExitCode != 0 && string.IsNullOrWhiteSpace(output)) return "";
                 output = output.Trim();
-                // Keep the payload small — the bar shows the first line, the
+                // Keep the payload small â€” the bar shows the first line, the
                 // tooltip up to three.
                 var lines = output.Split('\n');
-                if (lines.Length > 3) output = string.Join("\n", lines, 0, 3) + "\n…";
-                return output.Length > 300 ? output.Substring(0, 300) + "…" : output;
+                if (lines.Length > 3) output = string.Join("\n", lines, 0, 3) + "\nâ€¦";
+                return output.Length > 300 ? output.Substring(0, 300) + "â€¦" : output;
             }
             catch (Exception ex)
             {
@@ -2436,7 +2436,7 @@ public partial class AgentToolWindowControl : UserControl
                             else if (bt == "tool_use" && block.TryGetProperty("name", out var tn))
                             {
                                 if (text.Length > 0) text.AppendLine().AppendLine();
-                                text.Append($"- 🔧 {tn.GetString()}");
+                                text.Append($"- ðŸ”§ {tn.GetString()}");
                             }
                             // tool_result payloads are noise in a readable transcript
                         }
@@ -2454,7 +2454,7 @@ public partial class AgentToolWindowControl : UserControl
                     if (pendingCompact != null && cmdName == null)
                     {
                         sb.AppendLine();
-                        sb.AppendLine($"_🗜️ Compacted: {FmtTokensShort(pendingCompact.Value.pre)} → {FmtTokensShort(pendingCompact.Value.post)} tokens_");
+                        sb.AppendLine($"_ðŸ—œï¸ Compacted: {FmtTokensShort(pendingCompact.Value.pre)} â†’ {FmtTokensShort(pendingCompact.Value.post)} tokens_");
                         pendingCompact = null;
                     }
 
@@ -2469,7 +2469,7 @@ public partial class AgentToolWindowControl : UserControl
                     if (pendingCompact != null && cmdName != null)
                     {
                         sb.AppendLine();
-                        sb.AppendLine($"_🗜️ Compacted: {FmtTokensShort(pendingCompact.Value.pre)} → {FmtTokensShort(pendingCompact.Value.post)} tokens_");
+                        sb.AppendLine($"_ðŸ—œï¸ Compacted: {FmtTokensShort(pendingCompact.Value.pre)} â†’ {FmtTokensShort(pendingCompact.Value.post)} tokens_");
                         pendingCompact = null;
                     }
                 }
@@ -2477,7 +2477,7 @@ public partial class AgentToolWindowControl : UserControl
                 if (pendingCompact != null)
                 {
                     sb.AppendLine();
-                    sb.AppendLine($"_🗜️ Compacted: {FmtTokensShort(pendingCompact.Value.pre)} → {FmtTokensShort(pendingCompact.Value.post)} tokens_");
+                    sb.AppendLine($"_ðŸ—œï¸ Compacted: {FmtTokensShort(pendingCompact.Value.pre)} â†’ {FmtTokensShort(pendingCompact.Value.post)} tokens_");
                 }
 
                 Directory.CreateDirectory(_tempDir);
@@ -2500,7 +2500,7 @@ public partial class AgentToolWindowControl : UserControl
 
     // Discovers custom slash commands (V9): .claude/commands/**/*.md in the
     // project (working dir) and user (CLAUDE_CONFIG_DIR-aware) scopes. The CLI
-    // expands these when the message text is "/name", so the ⌘ menu only needs
+    // expands these when the message text is "/name", so the âŒ˜ menu only needs
     // the names; subfolders namespace with ':' matching the CLI.
     private async Task HandleGetSlashCommandsAsync(string? projectDir)
     {
@@ -2519,7 +2519,7 @@ public partial class AgentToolWindowControl : UserControl
                         items.Add((name, ReadFrontmatterDescription(file)));
                     }
                 }
-                catch { /* unreadable dir — treat as empty */ }
+                catch { /* unreadable dir â€” treat as empty */ }
                 return items.OrderBy(i => i.name, StringComparer.OrdinalIgnoreCase)
                             .Select(i => (object)new { i.name, i.description })
                             .ToList();
@@ -2542,7 +2542,7 @@ public partial class AgentToolWindowControl : UserControl
                         items.Add((System.IO.Path.GetFileName(sub), ReadFrontmatterDescription(skillMd)));
                     }
                 }
-                catch { /* unreadable dir — treat as empty */ }
+                catch { /* unreadable dir â€” treat as empty */ }
                 return items.OrderBy(i => i.name, StringComparer.OrdinalIgnoreCase)
                             .Select(i => (object)new { i.name, i.description })
                             .ToList();
@@ -2694,8 +2694,8 @@ public partial class AgentToolWindowControl : UserControl
     }
 
     // Opens a file in the VS editor, optionally navigating to a 1-based line
-    // range (V11 file-links). Relative paths — claude's markdown links are
-    // relative to its working directory per the appended system prompt —
+    // range (V11 file-links). Relative paths â€” claude's markdown links are
+    // relative to its working directory per the appended system prompt â€”
     // resolve against the agent cwd, falling back to the solution directory.
     private async Task OpenFileInEditorAsync(string? path, int startLine, int endLine, string? baseDir)
     {
@@ -2757,7 +2757,7 @@ public partial class AgentToolWindowControl : UserControl
                 : filePath;
 
             if (code!.Length > maxChars)
-                code = code.Substring(0, maxChars) + "\n… [selection truncated]";
+                code = code.Substring(0, maxChars) + "\nâ€¦ [selection truncated]";
 
             var lineInfo = startLine == endLine ? $"line {startLine}" : $"lines {startLine}-{endLine}";
             return $"\n\n<ide_selection>The user selected the following from {displayPath} ({lineInfo}):\n{code.TrimEnd('\r', '\n')}\n</ide_selection>";
@@ -2825,7 +2825,7 @@ public partial class AgentToolWindowControl : UserControl
         var lang = GetLanguageId(ext);
         if (string.IsNullOrEmpty(lang))
         {
-            // Extension-less or unmapped files — fall back to filename heuristics
+            // Extension-less or unmapped files â€” fall back to filename heuristics
             // (Dockerfile, Makefile, etc.) so the fence still gets a language ID.
             var fname = Path.GetFileName(filePath);
             if (!string.IsNullOrEmpty(fname))
@@ -2983,9 +2983,9 @@ public partial class AgentToolWindowControl : UserControl
         return sb.ToString();
     }
 
-    // Appends a {"type":"custom-title"} line to the session's JSONL — the exact
+    // Appends a {"type":"custom-title"} line to the session's JSONL â€” the exact
     // format claude itself writes for --name / TUI renames (probe-confirmed on
-    // 2.1.144) — so renames made in our History reach the terminal's /resume
+    // 2.1.144) â€” so renames made in our History reach the terminal's /resume
     // picker. UTF-8 without BOM; a BOM mid-file would corrupt the NDJSON.
     private static void AppendNativeCustomTitle(string sessionId, string title)
     {
@@ -3038,7 +3038,7 @@ public partial class AgentToolWindowControl : UserControl
                     .SelectMany(d => Directory.EnumerateFiles(d, "*.jsonl", SearchOption.TopDirectoryOnly));
             }
 
-            // Parse files in parallel — each JSONL is independent, IO-bound.
+            // Parse files in parallel â€” each JSONL is independent, IO-bound.
             // Order by mtime afterwards so the UI list stays newest-first.
             var orderedFiles = files.OrderByDescending(File.GetLastWriteTime).ToArray();
 
@@ -3077,7 +3077,7 @@ public partial class AgentToolWindowControl : UserControl
                         if (entryType == "user")
                         {
                             // Skill expansions and caveats are CLI-injected
-                            // (isMeta) — not real user messages; keep them out
+                            // (isMeta) â€” not real user messages; keep them out
                             // of the count and the preview.
                             if (IsMetaLine(root)) continue;
 
@@ -3109,7 +3109,7 @@ public partial class AgentToolWindowControl : UserControl
 
                                 candidate = StripLocalCommandCaveat(candidate).Trim();
                                 if (!string.IsNullOrEmpty(candidate))
-                                    preview = candidate.Length > 80 ? candidate.Substring(0, 80) + "…" : candidate;
+                                    preview = candidate.Length > 80 ? candidate.Substring(0, 80) + "â€¦" : candidate;
                             }
                         }
                         else if (entryType == "assistant")
@@ -3160,7 +3160,7 @@ public partial class AgentToolWindowControl : UserControl
                 if (string.IsNullOrEmpty(entry.preview) || entry.assistantTurns == 0) continue;
                 var sidecar = Path.Combine(Path.GetDirectoryName(entry.file)!, $"{entry.sessionId}.branch");
                 var isBranch = File.Exists(sidecar);
-                var preview = isBranch ? "↳ " + entry.preview : entry.preview;
+                var preview = isBranch ? "â†³ " + entry.preview : entry.preview;
                 // Sidecar Custom > native custom-title > sidecar Generated > native
                 // ai-title (> preview in the UI). Sessions named in the terminal show
                 // up here without any sidecar entry. An explicitly cleared custom
@@ -3213,12 +3213,12 @@ public partial class AgentToolWindowControl : UserControl
         // before the next message (auto-compact) to match the live order.
         (long pre, long post)? pendingCompact = null;
         // #21 backlog item 16: the model picker is a global pick, not per
-        // session — resuming on a different model than the session last used
+        // session â€” resuming on a different model than the session last used
         // forces a cache miss even inside the prompt-cache TTL. Track the last
         // real (non-synthetic) model so the UI can restore it on resume.
         var lastModel = "";
         // #21 backlog item 16 (part 2): same turn also carries what the UI
-        // needs to warn about a likely-expired prompt cache — when the
+        // needs to warn about a likely-expired prompt cache â€” when the
         // session went quiet and how big its context is. cacheTtlMin comes
         // from the turn's own cache_creation breakdown (1h vs 5m ephemeral
         // buckets) instead of a guess, so the heuristic matches this user's
@@ -3295,18 +3295,18 @@ public partial class AgentToolWindowControl : UserControl
                         text = content.GetString();
                     }
 
-                    // Slash-command / skill invocations (<command-name>/… —
+                    // Slash-command / skill invocations (<command-name>/â€¦ â€”
                     // type:"user" without isMeta) render as a clean chip instead
                     // of raw tags, so the response that follows still has a
                     // visible trigger (Bug 2, rodada #22a). The chip is a counted
-                    // user bubble, matching SessionOrdinals, so ⎇/⟲ stay aligned.
+                    // user bubble, matching SessionOrdinals, so âŽ‡/âŸ² stay aligned.
                     // (isCompactSummary and stdout/caveat echoes were already
                     // dropped by IsHiddenReplayLine above.)
                     var cmd = ExtractCommandInvocation(text);
                     if (cmd != null)
                     {
                         msgs.Add(new { role = "command", text = cmd });
-                        // The /compact chip's divider was held back — flush it
+                        // The /compact chip's divider was held back â€” flush it
                         // below the chip now (live order: command, then result).
                         if (pendingCompact != null)
                         {
@@ -3328,7 +3328,7 @@ public partial class AgentToolWindowControl : UserControl
                     }
 
                     // Question cards and tool chips ride along with the text
-                    // bubbles — the replay used to be text-only, so answered
+                    // bubbles â€” the replay used to be text-only, so answered
                     // cards and Edit/Bash/todo activity vanished when reopening
                     // from History (rodadas 4/5 screenshots).
                     CollectToolReplay(root, content, msgs, pendingTools);
@@ -3366,19 +3366,19 @@ public partial class AgentToolWindowControl : UserControl
     // are flagged isMeta:true. The official UI hides them; rendering one paints
     // a multi-hundred-KB skill prompt as a user bubble (rodada 11). Every
     // JSONL consumer that counts or displays user/assistant lines must skip
-    // them, or ⎇/⟲ ordinals desync from the DOM (which never renders them).
+    // them, or âŽ‡/âŸ² ordinals desync from the DOM (which never renders them).
     private static bool IsMetaLine(JsonElement root) =>
         root.TryGetProperty("isMeta", out var metaEl) && metaEl.ValueKind == JsonValueKind.True;
 
     // Tool replay for transcript re-renders (History resume and branch): every
-    // tool_use becomes a replayable entry — AskUserQuestion as {role:"ask"}
+    // tool_use becomes a replayable entry â€” AskUserQuestion as {role:"ask"}
     // (answers patched from the CLI's top-level toolUseResult.answers map,
     // multi-select joined with ", "), everything else as {role:"tool"} carrying
-    // name/id/raw input, with the error flag and a short ↳ result summary
+    // name/id/raw input, with the error flag and a short â†³ result summary
     // patched in when the matching tool_result line arrives. Entries stay
     // dictionaries so the patch can happen after the entry is already listed.
-    // Sidechain (subagent) lines are skipped — the live UI never showed their
-    // tools either. The rewind ⟲ card is NOT replayable: the CLI records
+    // Sidechain (subagent) lines are skipped â€” the live UI never showed their
+    // tools either. The rewind âŸ² card is NOT replayable: the CLI records
     // checkpoints (file-history-snapshot) but not the rewind event itself.
     private static void CollectToolReplay(
         JsonElement root, JsonElement content,
@@ -3462,7 +3462,7 @@ public partial class AgentToolWindowControl : UserControl
                 if (!string.IsNullOrWhiteSpace(resultText))
                 {
                     var firstLine = resultText!.TrimStart().Split('\n')[0].TrimEnd('\r');
-                    entry["result"] = firstLine.Length > 200 ? firstLine.Substring(0, 200) + "…" : firstLine;
+                    entry["result"] = firstLine.Length > 200 ? firstLine.Substring(0, 200) + "â€¦" : firstLine;
                 }
             }
         }
@@ -3472,8 +3472,8 @@ public partial class AgentToolWindowControl : UserControl
     {
         // The UI sends the session its transcript is SHOWING. After a History
         // replay the agent's CurrentSessionId still points at the last live
-        // session — branching that forked the wrong conversation, repeatedly
-        // (rodada 12, image_4). The UI id also makes ⎇ work on a replayed
+        // session â€” branching that forked the wrong conversation, repeatedly
+        // (rodada 12, image_4). The UI id also makes âŽ‡ work on a replayed
         // session before any message is sent (no live agent required).
         var currentSessionId = !string.IsNullOrEmpty(uiSessionId) ? uiSessionId : _agentClient.CurrentSessionId;
         if (string.IsNullOrEmpty(currentSessionId))
@@ -3521,15 +3521,15 @@ public partial class AgentToolWindowControl : UserControl
         }
 
         // #22a: ordinal math extracted to ClaudeStudioShared.SessionOrdinals,
-        // unit-tested there (the class of bug behind the rounds-11/12 ⎇/⟲
-        // desyncs). No bounds check today for an out-of-range msgIndex — the
-        // whole file gets kept/copied — so the fallback reproduces that
+        // unit-tested there (the class of bug behind the rounds-11/12 âŽ‡/âŸ²
+        // desyncs). No bounds check today for an out-of-range msgIndex â€” the
+        // whole file gets kept/copied â€” so the fallback reproduces that
         // exactly instead of erroring.
         var boundary = ClaudeStudioShared.SessionOrdinals.FindBranchBoundaryLineIndex(allLines, msgIndex)
                        ?? allLines.Count - 1;
 
         // Hold a compact divider until after the /compact chip (or before the
-        // next message) — the JSONL writes the boundary before the command echo.
+        // next message) â€” the JSONL writes the boundary before the command echo.
         (long pre, long post)? pendingCompact = null;
 
         for (int i = 0; i <= boundary; i++)
@@ -3559,7 +3559,7 @@ public partial class AgentToolWindowControl : UserControl
                 if (string.IsNullOrEmpty(text))
                 {
                     // No visible bubble, but the line may carry tool_use/
-                    // tool_result content — replayed as cards/chips without
+                    // tool_result content â€” replayed as cards/chips without
                     // consuming a visible-message ordinal (branch/rewind
                     // ordinals index text bubbles only).
                     if (pendingCompact != null)
@@ -3573,7 +3573,7 @@ public partial class AgentToolWindowControl : UserControl
                 }
 
                 keptLines.Add(RewriteSessionIdInLine(line, newSessionId));
-                // /command or /skill invocations render as a chip (Bug 2) — still
+                // /command or /skill invocations render as a chip (Bug 2) â€” still
                 // a counted user bubble so the boundary math stays aligned.
                 var cmd = ExtractCommandInvocation(text);
                 if (cmd != null)
@@ -3615,13 +3615,13 @@ public partial class AgentToolWindowControl : UserControl
             return;
         }
 
-        OutputLog.Info($"branched session {currentSessionId} → {newSessionId} at msgIndex {msgIndex} ({msgs.Count} messages kept)");
+        OutputLog.Info($"branched session {currentSessionId} â†’ {newSessionId} at msgIndex {msgIndex} ({msgs.Count} messages kept)");
 
         await _agentClient.StopAsync();
         _agentClient.PendingResumeSessionId = newSessionId;
         // Defensive: a fork requested via History but never sent (user did a
-        // ⎇ branch instead before typing) must not leak into this unrelated
-        // resume — branch already has its own new session id on disk (#12).
+        // âŽ‡ branch instead before typing) must not leak into this unrelated
+        // resume â€” branch already has its own new session id on disk (#12).
         _agentClient.PendingForkSession = false;
 
         var json = JsonSerializer.Serialize(new { type = "branched", sessionId = newSessionId, messages = msgs });
@@ -3630,7 +3630,7 @@ public partial class AgentToolWindowControl : UserControl
     }
 
     // Native file rewind. msgIndex here is the UI's *user-message ordinal* (the
-    // Nth user message), which maps 1:1 to the user entries in the JSONL — unlike
+    // Nth user message), which maps 1:1 to the user entries in the JSONL â€” unlike
     // the mixed user+assistant index used by branching, which drifts when an
     // assistant turn produces multiple text entries. We collect the uuids of user
     // entries that carry text (real messages, not tool_result entries) and index
@@ -3650,11 +3650,11 @@ public partial class AgentToolWindowControl : UserControl
         // Rewind runs through the live CLI on ITS session. When the transcript
         // on screen is a History replay of another session, the ordinals below
         // would index the wrong file and revert the wrong checkpoints
-        // (rodada 12) — refuse until a message reactivates the session.
+        // (rodada 12) â€” refuse until a message reactivates the session.
         if (!string.IsNullOrEmpty(uiSessionId) &&
             !string.Equals(uiSessionId, currentSessionId, StringComparison.OrdinalIgnoreCase))
         {
-            PostRewindError("This session isn't active yet — send a message first, then rewind.");
+            PostRewindError("This session isn't active yet â€” send a message first, then rewind.");
             return;
         }
 
@@ -3682,7 +3682,7 @@ public partial class AgentToolWindowControl : UserControl
         }
 
         // #22a: ordinal math (isMeta/text-emptiness/tool_result-echo rules)
-        // lives in ClaudeStudioShared.SessionOrdinals now, unit-tested there —
+        // lives in ClaudeStudioShared.SessionOrdinals now, unit-tested there â€”
         // this is the class of bug the rounds-11/12 desyncs came from.
         var (uuid, totalUserMessages) = ClaudeStudioShared.SessionOrdinals.FindRewindUserUuid(lines, msgIndex);
         if (uuid == null)
@@ -3709,7 +3709,7 @@ public partial class AgentToolWindowControl : UserControl
             })));
     }
 
-    // Mirrors app.js fmtTokens: 33403 → "33.4k". Used by the transcript export's
+    // Mirrors app.js fmtTokens: 33403 â†’ "33.4k". Used by the transcript export's
     // compact divider so it reads the same as the chat.
     private static string FmtTokensShort(long n)
     {
@@ -3721,9 +3721,9 @@ public partial class AgentToolWindowControl : UserControl
 
     // A compact_boundary is a type:"system" line that /compact (or auto-compact)
     // writes with the before/after token counts. The live stream renders a
-    // "🗜️ Compacted: X → Y tokens" divider from it (app.js compact-boundary);
+    // "ðŸ—œï¸ Compacted: X â†’ Y tokens" divider from it (app.js compact-boundary);
     // this rebuilds the same on History replay, where system lines are otherwise
-    // skipped. It's a divider, not a counted bubble — no ⎇/⟲ ordinal impact.
+    // skipped. It's a divider, not a counted bubble â€” no âŽ‡/âŸ² ordinal impact.
     private static bool TryExtractCompactBoundary(JsonElement root, out long preTokens, out long postTokens)
     {
         preTokens = 0;
@@ -3836,8 +3836,8 @@ public partial class AgentToolWindowControl : UserControl
 
     private async Task HandleGetDiffAsync()
     {
-        // Wrap everything so we always post SOMETHING back to the WebView —
-        // otherwise the "Running git diff…" loader sits there forever on any
+        // Wrap everything so we always post SOMETHING back to the WebView â€”
+        // otherwise the "Running git diffâ€¦" loader sits there forever on any
         // exception path.
         string stat = "";
         string diff = "";
@@ -3869,7 +3869,7 @@ public partial class AgentToolWindowControl : UserControl
                 stat = await RunGitAsync(workDir, "diff --stat HEAD");
                 diff = await RunGitAsync(workDir, "diff HEAD");
 
-                // Repo sem commits ainda → diff HEAD vazio. Sintetiza "tudo novo".
+                // Repo sem commits ainda â†’ diff HEAD vazio. Sintetiza "tudo novo".
                 if (string.IsNullOrWhiteSpace(stat) && string.IsNullOrWhiteSpace(diff))
                 {
                     var hasHead = !string.IsNullOrWhiteSpace(
@@ -3968,7 +3968,7 @@ public partial class AgentToolWindowControl : UserControl
                 CreateNoWindow = true,
                 // git emits UTF-8 by default; without this hint the host process
                 // would decode with the OS ANSI codepage and mangle non-ASCII
-                // bytes (e.g. "Aplicação" → "AplicaÃ§Ã£o").
+                // bytes (e.g. "AplicaÃ§Ã£o" â†’ "AplicaÃƒÂ§ÃƒÂ£o").
                 StandardOutputEncoding = Encoding.UTF8,
                 StandardErrorEncoding = Encoding.UTF8
             };
@@ -4028,9 +4028,9 @@ public partial class AgentToolWindowControl : UserControl
 
     // Opens a native VS side-by-side diff tab for an edited file: left = the git
     // HEAD baseline (reusing GetGitBaselineAsync), right = the current on-disk
-    // content. Read-only review — both sides are written to throwaway temp files
+    // content. Read-only review â€” both sides are written to throwaway temp files
     // that VS deletes on close (the *FileIsTemporary flags). New/untracked files
-    // get an empty left side (renders as all-added). Never throws — failures just
+    // get an empty left side (renders as all-added). Never throws â€” failures just
     // log and no tab opens.
     private async Task HandleOpenVsDiffAsync(string filePath, string toolName)
     {
@@ -4044,7 +4044,7 @@ public partial class AgentToolWindowControl : UserControl
 
             var current = await Task.Run(() => File.ReadAllText(filePath));
             var (baseline, baselineErr) = await GetGitBaselineAsync(filePath);
-            // No git baseline (new file / untracked / no repo) → empty left side.
+            // No git baseline (new file / untracked / no repo) â†’ empty left side.
             baseline ??= "";
 
             var fileName = Path.GetFileName(filePath);
@@ -4083,12 +4083,133 @@ public partial class AgentToolWindowControl : UserControl
         }
     }
 
+    // Builds the open solution through VS (output appears in the Build pane) and
+    // returns a summary plus Error List entries. Empty string = could not build.
+    private async Task<string> RunVsBuildAsync(string spec)
+    {
+        await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
+
+        var parts = spec.Split(':');
+        var action = parts.Length > 1 && parts[1].Length > 0 ? parts[1] : "build";
+        var scope = parts.Length > 2 && parts[2].Length > 0 ? parts[2] : "solution";
+        var projectName = parts.Length > 3 ? parts[3] : "";
+
+        var dte = Package.GetGlobalService(typeof(EnvDTE.DTE)) as EnvDTE.DTE;
+        if (dte?.Solution == null || string.IsNullOrEmpty(dte.Solution.FullName))
+            return "";
+
+        var build = dte.Solution.SolutionBuild;
+        var config = build.ActiveConfiguration?.Name ?? "Debug";
+
+        string? uniqueName = null;
+        if (scope == "project")
+        {
+            uniqueName = FindProjectUniqueName(dte.Solution.Projects, projectName);
+            if (uniqueName == null)
+                return $"Project '{projectName}' was not found in the open solution.";
+        }
+
+        try { dte.ExecuteCommand("View.Output"); } catch { }
+
+        var steps = action == "rebuild" ? new[] { "clean", "build" } : new[] { action };
+        foreach (var step in steps)
+        {
+            var done = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            EnvDTE._dispBuildEvents_OnBuildDoneEventHandler handler = (s, a) => done.TrySetResult(true);
+            dte.Events.BuildEvents.OnBuildDone += handler;
+            try
+            {
+                if (scope == "solution")
+                {
+                    if (step == "clean") build.Clean(false); else build.Build(false);
+                }
+                else if (step == "build")
+                {
+                    build.BuildProject(config, uniqueName, false);
+                }
+                else
+                {
+                    CleanProject(uniqueName!);
+                }
+                await done.Task;
+            }
+            finally { dte.Events.BuildEvents.OnBuildDone -= handler; }
+        }
+
+        var target = scope == "project" ? $"project {projectName}" : "solution";
+        if (action == "clean")
+            return $"Clean of {target} completed.";
+
+        // Let the Error List catch up with the finished build.
+        await Task.Delay(700);
+
+        var failed = build.LastBuildInfo;
+        var (errors, warnings, prompt) = await Diagnostics.ErrorListReader.ReadAllAsync(_lastWorkingDir);
+        var verb = action == "rebuild" ? "Rebuild" : "Build";
+        if (failed == 0 && errors == 0)
+            return $"{verb} of {target} succeeded ({warnings} warning(s)).";
+        if (errors == 0)
+            return $"{verb} of {target} failed in {failed} project(s) but the Error List has no errors; check the VS Output window.";
+        return prompt;
+    }
+
+    private static string? FindProjectUniqueName(EnvDTE.Projects projects, string name)
+    {
+        ThreadHelper.ThrowIfNotOnUIThread();
+        foreach (EnvDTE.Project p in projects)
+        {
+            var found = FindProjectUniqueName(p, name);
+            if (found != null) return found;
+        }
+        return null;
+    }
+
+    private static string? FindProjectUniqueName(EnvDTE.Project? p, string name)
+    {
+        ThreadHelper.ThrowIfNotOnUIThread();
+        if (p == null) return null;
+        if (p.Kind == "{66A26720-8FB5-11D2-AA7E-00C04F688DDE}") // solution folder
+        {
+            if (p.ProjectItems == null) return null;
+            foreach (EnvDTE.ProjectItem item in p.ProjectItems)
+            {
+                var found = FindProjectUniqueName(item.SubProject, name);
+                if (found != null) return found;
+            }
+            return null;
+        }
+        return string.Equals(p.Name, name, StringComparison.OrdinalIgnoreCase) ? p.UniqueName : null;
+    }
+
+    private static void CleanProject(string uniqueName)
+    {
+        ThreadHelper.ThrowIfNotOnUIThread();
+        var sln = (Microsoft.VisualStudio.Shell.Interop.IVsSolution)Package.GetGlobalService(typeof(Microsoft.VisualStudio.Shell.Interop.SVsSolution));
+        sln.GetProjectOfUniqueName(uniqueName, out var hier);
+        var mgr = (Microsoft.VisualStudio.Shell.Interop.IVsSolutionBuildManager2)Package.GetGlobalService(typeof(Microsoft.VisualStudio.Shell.Interop.SVsSolutionBuildManager));
+        mgr.StartSimpleUpdateProjectConfiguration(hier, null, null,
+            (uint)Microsoft.VisualStudio.Shell.Interop.VSSOLNBUILDUPDATEFLAGS.SBF_OPERATION_CLEAN, 0, 0);
+    }
+
     // Handles a diagnostics_request from the agent's PostToolUse hook: give VS a
     // moment to re-analyze the just-edited file, read its Error List entries, and
     // send them back so the (blocked) hook can surface them to claude. Never
-    // throws — on any failure the agent's hook times out and just adds no context.
+    // throws â€” on any failure the agent's hook times out and just adds no context.
     private async Task HandleDiagnosticsRequestAsync(string filePath, string requestId)
     {
+        if (filePath.StartsWith("@build"))
+        {
+            string result;
+            try { result = await RunVsBuildAsync(filePath); }
+            catch (Exception ex)
+            {
+                OutputLog.Warn($"VS build request failed: {ex.Message}");
+                result = "";
+            }
+            try { await _agentClient.SendDiagnosticsResponseAsync(requestId, result); } catch { }
+            return;
+        }
+
         try
         {
             // The edit just hit disk; the language service needs a beat to refresh
@@ -4124,7 +4245,7 @@ public partial class AgentToolWindowControl : UserControl
         [JsonPropertyName("sessionId")]
         public string? SessionId { get; set; }
 
-        // resume-session: true → resume as a fork (--fork-session), leaving
+        // resume-session: true â†’ resume as a fork (--fork-session), leaving
         // the original session untouched (#12).
         [JsonPropertyName("fork")]
         public bool Fork { get; set; }

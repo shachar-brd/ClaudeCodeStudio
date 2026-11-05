@@ -21,6 +21,12 @@ if (args.Length >= 2 && args[0] == "--hook-post")
     return await HookMode.RunPostAsync(args[1]);
 }
 
+// MCP stdio server (vs_build tool): spawned by claude via --mcp-config.
+if (args.Length >= 2 && args[0] == "--mcp")
+{
+    return await McpMode.RunAsync(args[1]);
+}
+
 // Phase 2 (gated): when enabled, the agent stands up a named pipe server that
 // hook helper processes connect to in order to broker permission prompts.
 PermissionPipeServer? pipeServer = null;
@@ -679,6 +685,12 @@ The user's IDE selection (if any) is included in the conversation context and ma
                 psi.ArgumentList.Add("--settings");
                 psi.ArgumentList.Add(settingsPath);
                 psi.ArgumentList.Add("--include-hook-events");
+                var mcpConfigPath = WriteMcpConfig();
+                if (mcpConfigPath != null)
+                {
+                    psi.ArgumentList.Add("--mcp-config");
+                    psi.ArgumentList.Add(mcpConfigPath);
+                }
                 settingsWritten = true;
                 // Claude has an internal permission check for file-modifying tools
                 // (Edit/Write/MultiEdit) that runs BEFORE PreToolUse hooks in stdio
@@ -1405,6 +1417,29 @@ The user's IDE selection (if any) is included in the conversation context and ma
                 }
             }
         };
+    }
+
+    // Declares the Visual Studio bridge MCP server (this same exe in --mcp mode).
+    private string? WriteMcpConfig()
+    {
+        try
+        {
+            var exe = Environment.ProcessPath;
+            if (string.IsNullOrEmpty(exe)) return null;
+            var dir = Path.Combine(Path.GetTempPath(), "ClaudeStudio");
+            Directory.CreateDirectory(dir);
+            var path = Path.Combine(dir, $"mcp-{Environment.ProcessId}.json");
+            var cfg = new Dictionary<string, object>
+            {
+                ["mcpServers"] = new Dictionary<string, object>
+                {
+                    [McpMode.ServerName] = new { command = exe, args = new[] { "--mcp", _pipeName! } }
+                }
+            };
+            File.WriteAllText(path, JsonSerializer.Serialize(cfg));
+            return path;
+        }
+        catch { return null; }
     }
 
     // User-configurable claude.exe settings surfaced via the extension UI (V7).

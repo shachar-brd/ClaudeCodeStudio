@@ -289,6 +289,12 @@ internal sealed class PermissionPipeServer : IAsyncDisposable
                 return;
             }
 
+            if (reqType == "build_request")
+            {
+                await HandleBuildRequestAsync(pipe, req, ct);
+                return;
+            }
+
             toolUseId = req.TryGetProperty("tool_use_id", out var tid) ? tid.GetString() : null;
             var toolName = req.TryGetProperty("tool_name", out var tn) ? tn.GetString() : null;
             var toolInput = req.TryGetProperty("tool_input", out var ti) ? ti.GetRawText() : null;
@@ -299,6 +305,10 @@ internal sealed class PermissionPipeServer : IAsyncDisposable
                 EmitError("pipe: request missing tool_use_id or tool_name");
                 return;
             }
+
+            if (toolName == "Bash" && IsBuildCommand(toolInput)
+                && await TryRunBuildInVsAsync(pipe, toolUseId!, ct))
+                return;
 
             // Rule evaluation first (deny > ask > allow), then the session
             // allowlist short-circuit. An ask-rule match forces the modal even
@@ -317,7 +327,13 @@ internal sealed class PermissionPipeServer : IAsyncDisposable
             });
 
             Decision decision;
-            if (IsPlanFileWrite(toolName!, toolInput))
+            if (toolName!.StartsWith("mcp__" + McpMode.ServerName + "__", StringComparison.Ordinal))
+            {
+                // Our own VS bridge: read/build only, no prompt needed.
+                decision = new Decision(true, null);
+                LogAuto("allowed: Visual Studio bridge tool");
+            }
+            else if (IsPlanFileWrite(toolName!, toolInput))
             {
                 // Plan mode saves its plan document to ~/.claude/plans/<slug>.md
                 // through the Write tool — CLI bookkeeping, not a workspace edit.
@@ -435,6 +451,85 @@ internal sealed class PermissionPipeServer : IAsyncDisposable
             try { pipe.Disconnect(); } catch { }
             await pipe.DisposeAsync();
         }
+    }
+
+    private static readonly TimeSpan BuildTimeout = TimeSpan.FromMinutes(15);
+
+    // Marker carried in diagnostics_request.Text to ask the extension for a VS build.
+    public const string BuildRequestMarker = "@build";
+
+    private static readonly Regex BuildCommandRegex = new(
+        @"^\s*(dotnet\s+build|dotnet\s+msbuild|msbuild(\.exe)?)(\s|$)",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    // Only plain, single build commands; chained/piped commands run normally.
+    private static bool IsBuildCommand(string? toolInput)
+    {
+        if (string.IsNullOrEmpty(toolInput)) return false;
+        try
+        {
+            using var doc = JsonDocument.Parse(toolInput);
+            if (!doc.RootElement.TryGetProperty("command", out var c)) return false;
+            var cmd = c.GetString();
+            if (string.IsNullOrWhiteSpace(cmd)) return false;
+            if (cmd.IndexOfAny(new[] { '&', '|', ';', '\n', '>', '<' }) >= 0) return false;
+            return BuildCommandRegex.IsMatch(cmd);
+        }
+        catch { return false; }
+    }
+
+    // Runs the build inside Visual Studio (visible in its Output window) and hands
+    // the result back to claude as the denial reason, so the shell build never
+    // runs. Returns false (normal permission flow) if VS gave no result.
+    // spec = "@build:<build|rebuild|clean>:<solution|project>:<projectName>"
+    private async Task<string> RequestBuildTextAsync(string requestId, string spec, CancellationToken ct)
+    {
+        var tcs = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+        if (!_pendingDiag.TryAdd(requestId, tcs)) return "";
+
+        string text = "";
+        try
+        {
+            EmitChunk(new ChatChunk { Type = "diagnostics_request", ToolId = requestId, Text = spec });
+            var completed = await Task.WhenAny(tcs.Task, Task.Delay(BuildTimeout, ct));
+            if (completed == tcs.Task) text = await tcs.Task;
+        }
+        catch (OperationCanceledException) { }
+        finally { _pendingDiag.TryRemove(requestId, out _); }
+        return text;
+    }
+
+    private async Task HandleBuildRequestAsync(NamedPipeServerStream pipe, JsonElement req, CancellationToken ct)
+    {
+        string Get(string name) => req.TryGetProperty(name, out var v) ? v.GetString() ?? "" : "";
+        var id = Get("request_id");
+        var spec = $"{BuildRequestMarker}:{Get("action")}:{Get("scope")}:{Get("project")}";
+        var text = string.IsNullOrEmpty(id) ? "" : await RequestBuildTextAsync(id, spec, ct);
+        if (string.IsNullOrWhiteSpace(text))
+            text = "Visual Studio did not return a build result. Is a solution open in the IDE with the Claude Code Studio window running?";
+
+        var bytes = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(new { type = "build_response", text }) + "\n");
+        try
+        {
+            await pipe.WriteAsync(bytes, ct);
+            await pipe.FlushAsync(ct);
+        }
+        catch (OperationCanceledException) { }
+    }
+
+    private async Task<bool> TryRunBuildInVsAsync(NamedPipeServerStream pipe, string toolUseId, CancellationToken ct)
+    {
+        var text = await RequestBuildTextAsync(toolUseId, $"{BuildRequestMarker}:build:solution:", ct);
+
+        if (string.IsNullOrWhiteSpace(text)) return false;
+
+        var reason = "The shell build was not run. Visual Studio built the solution instead " +
+                     "(visible in its Output window). Result:\n" + text;
+        var responseObj = new { type = "perm_response", tool_use_id = toolUseId, decision = "deny", reason };
+        var bytes = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(responseObj) + "\n");
+        await pipe.WriteAsync(bytes, ct);
+        await pipe.FlushAsync(ct);
+        return true;
     }
 
     private async Task HandleDiagRequestAsync(NamedPipeServerStream pipe, JsonElement req, CancellationToken ct)

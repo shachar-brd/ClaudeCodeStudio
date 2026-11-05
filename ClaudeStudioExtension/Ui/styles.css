@@ -41,7 +41,7 @@ body {
 }
 
 .topbar {
-    height: 48px;
+    height: 36px;
     display: flex;
     align-items: center;
     justify-content: space-between;
@@ -53,14 +53,14 @@ body {
 .brand {
     display: flex;
     align-items: center;
-    gap: 8px;
-    font-size: 16px;
+    gap: 6px;
+    font-size: 13px;
     font-weight: 600;
 }
 
 .logo {
     color: #ff9f43;
-    font-size: 22px;
+    font-size: 16px;
 }
 
 .topbar-right {
@@ -81,11 +81,11 @@ body {
     background: none;
     border: none;
     color: #ddd;
-    font-size: 18px;
+    font-size: 15px;
     cursor: pointer;
     padding: 0;
-    width: 34px;
-    height: 34px;
+    width: 28px;
+    height: 28px;
     border-radius: 6px;
     line-height: 1;
     display: flex;
@@ -1028,12 +1028,12 @@ html.light-theme .history-footer {
 }
 
 .titlebar {
-    height: 46px;
+    height: 34px;
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: 0 18px;
-    font-size: 18px;
+    padding: 0 12px;
+    font-size: 14px;
     font-weight: 600;
     border-bottom: 1px solid #333;
 }
@@ -2110,10 +2110,10 @@ html.light-theme .permission-item.active {
     flex: 1;
     min-height: 0;
     overflow-y: auto;
-    padding: 12px;
+    padding: 6px 4px;
     display: flex;
     flex-direction: column;
-    gap: 6px;
+    gap: 4px;
 }
 
 .message {
@@ -2248,9 +2248,9 @@ html.light-theme .rewind-file-list { color: #555; }
 }
 
 .bubble {
-    max-width: 75%;
-    padding: 8px 12px;
-    border-radius: 10px;
+    max-width: 100%;
+    padding: 5px 8px;
+    border-radius: 8px;
     line-height: 1.4;
     font-size: var(--chat-font-size, 13px);
     white-space: pre-wrap;
@@ -2258,11 +2258,14 @@ html.light-theme .rewind-file-list { color: #555; }
 }
 
 .user .bubble {
+    max-width: 90%;
     background: var(--accent);
     color: white;
 }
 
 .assistant .bubble {
+    flex: 1 1 auto;
+    min-width: 0;
     background: #2a2a2a;
     border: 1px solid #3a3a3a;
 }

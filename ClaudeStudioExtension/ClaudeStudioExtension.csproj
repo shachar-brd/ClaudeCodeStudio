@@ -8,6 +8,8 @@
     <VSSDKBuildToolsAutoSetup>true</VSSDKBuildToolsAutoSetup>
     <GeneratePkgDefFile>true</GeneratePkgDefFile>
     <UseWPF>true</UseWPF>
+	<DeployExtension>False</DeployExtension>
+	<VSSDKTargetPlatformRegRootSuffix>Exp</VSSDKTargetPlatformRegRootSuffix>
   </PropertyGroup>
   <ItemGroup>
     <None Remove="AgentToolWindowControl.xaml" />

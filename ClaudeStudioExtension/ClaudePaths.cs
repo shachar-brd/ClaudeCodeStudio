@@ -47,6 +47,10 @@ public static class ClaudePaths
     public static string ClaudeJsonPath =>
         EnvDir != null ? Path.Combine(EnvDir, ".claude.json") : Path.Combine(Home, ".claude.json");
 
+    // Gateway (enterprise) login tokens live here, under "enterpriseGateway",
+    // instead of oauthAccount in .claude.json.
+    public static string CredentialsJsonPath => Path.Combine(ConfigDir, ".credentials.json");
+
     // User-scope custom slash commands.
     public static string UserCommandsDir => Path.Combine(ConfigDir, "commands");
 

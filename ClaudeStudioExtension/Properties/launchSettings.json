@@ -1,0 +1,12 @@
+{
+  "profiles": {
+    "ClaudeStudioExtension": {
+      "commandName": "Project"
+    },
+    "Profile 1": {
+      "commandName": "Executable",
+      "executablePath": "C:\\Program Files\\Microsoft Visual Studio\\2022\\Professional\\Common7\\IDE\\devenv.exe",
+      "commandLineArgs": "/rootsuffix Exp"
+    }
+  }
+}

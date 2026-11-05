@@ -32,6 +32,7 @@ public partial class AgentToolWindowControl : UserControl
     private DateTime _sessionStart = DateTime.Now;
     private static bool _tempCleanupDone;
     private FileSystemWatcher? _claudeJsonWatcher;
+    private FileSystemWatcher? _credentialsWatcher;
     private bool _lastSignedInStatus;
     private System.Threading.Timer? _claudeJsonDebounceTimer;
     private FileSystemWatcher? _trustedWorkspacesWatcher;
@@ -582,6 +583,9 @@ public partial class AgentToolWindowControl : UserControl
     // but avoids allocating the full payload.
     private static bool IsSignedIn()
     {
+        // Gateway login (forceLoginMethod=gateway) writes no oauthAccount.
+        if (GatewayLogin.TryRead(out _)) return true;
+
         var path = ClaudeJsonPath;
         if (!File.Exists(path)) return false;
         try
@@ -602,8 +606,21 @@ public partial class AgentToolWindowControl : UserControl
     {
         var path = ClaudeJsonPath;
 
+        // Gateway login: signed in with no oauthAccount. Only the host is shown;
+        // token values are never read out of GatewayLogin.
+        var isGateway = GatewayLogin.TryRead(out var gatewayHost);
+        object GatewayInfo() => new
+        {
+            type = "account-info",
+            signedIn = true,
+            organizationName = gatewayHost,
+            accountDisplayName = (string?)null,
+            email = (string?)null,
+            plan = "Gateway"
+        };
+
         if (!File.Exists(path))
-            return new { type = "account-info", signedIn = false };
+            return isGateway ? GatewayInfo() : new { type = "account-info", signedIn = false };
 
         try
         {
@@ -623,7 +640,7 @@ public partial class AgentToolWindowControl : UserControl
 
             // No oauthAccount object — treat as signed out (CLI hasn't logged in yet).
             if (organizationName == null && email == null && accountDisplayName == null)
-                return new { type = "account-info", signedIn = false };
+                return isGateway ? GatewayInfo() : new { type = "account-info", signedIn = false };
 
             // Personal Claude Pro accounts use email-like org names; drop those so
             // the cascade in JS can fall back to a real display name.
@@ -649,7 +666,7 @@ public partial class AgentToolWindowControl : UserControl
         catch (Exception ex)
         {
             OutputLog.Warn($"~/.claude.json parse failed: {ex.Message}");
-            return new { type = "account-info", signedIn = false };
+            return isGateway ? GatewayInfo() : new { type = "account-info", signedIn = false };
         }
     }
 
@@ -848,6 +865,36 @@ public partial class AgentToolWindowControl : UserControl
                     || string.Equals(args.OldFullPath, targetPath, StringComparison.OrdinalIgnoreCase))
                     DebouncedReloadAccountInfo();
             };
+
+            // Gateway login writes <config>/.credentials.json and never touches
+            // oauthAccount in .claude.json, so watch it as well.
+            var credPath = ClaudePaths.CredentialsJsonPath;
+            var credDir = Path.GetDirectoryName(credPath);
+            if (!string.IsNullOrEmpty(credDir) && Directory.Exists(credDir))
+            {
+                _credentialsWatcher = new FileSystemWatcher(credDir)
+                {
+                    NotifyFilter = NotifyFilters.LastWrite
+                        | NotifyFilters.CreationTime
+                        | NotifyFilters.FileName
+                        | NotifyFilters.Size,
+                    EnableRaisingEvents = true,
+                };
+                FileSystemEventHandler onCredChange = (_, args) =>
+                {
+                    if (string.Equals(args.FullPath, credPath, StringComparison.OrdinalIgnoreCase))
+                        DebouncedReloadAccountInfo();
+                };
+                _credentialsWatcher.Changed += onCredChange;
+                _credentialsWatcher.Created += onCredChange;
+                _credentialsWatcher.Deleted += onCredChange;
+                _credentialsWatcher.Renamed += (_, args) =>
+                {
+                    if (string.Equals(args.FullPath, credPath, StringComparison.OrdinalIgnoreCase)
+                        || string.Equals(args.OldFullPath, credPath, StringComparison.OrdinalIgnoreCase))
+                        DebouncedReloadAccountInfo();
+                };
+            }
         }
         catch (Exception ex)
         {
@@ -861,6 +908,8 @@ public partial class AgentToolWindowControl : UserControl
         {
             _claudeJsonWatcher?.Dispose();
             _claudeJsonWatcher = null;
+            _credentialsWatcher?.Dispose();
+            _credentialsWatcher = null;
             _claudeJsonDebounceTimer?.Dispose();
             _claudeJsonDebounceTimer = null;
         }

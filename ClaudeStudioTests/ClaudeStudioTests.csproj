@@ -21,4 +21,10 @@
     <ProjectReference Include="..\ClaudeStudioShared\ClaudeStudioShared.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- Pure BCL sources from the net472 extension, linked so they can be tested on net10. -->
+    <Compile Include="..\ClaudeStudioExtension\GatewayLogin.cs" Link="Linked\GatewayLogin.cs" />
+    <Compile Include="..\ClaudeStudioExtension\ClaudePaths.cs" Link="Linked\ClaudePaths.cs" />
+  </ItemGroup>
+
 </Project>

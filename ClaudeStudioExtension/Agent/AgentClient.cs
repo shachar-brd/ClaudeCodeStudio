@@ -85,6 +85,10 @@ public class AgentClient
         });
     }
 
+    // Set when StartAsync replaced a dead agent process; consumed by the next turn so it
+    // re-resumes the live session instead of letting the new agent start an empty one.
+    private bool _agentRestartedSinceLastTurn;
+
     public async Task StartAsync()
     {
         if (_process != null)
@@ -95,6 +99,7 @@ public class AgentClient
             try { alive = !_process.HasExited; } catch { alive = false; }
             if (alive) return;
             OutputLog.Warn("agent process was dead — restarting");
+            _agentRestartedSinceLastTurn = true;
             try { _reader?.Dispose(); } catch { }
             try { _writer?.Dispose(); } catch { }
             try { _process.Dispose(); } catch { }
@@ -451,13 +456,30 @@ public class AgentClient
         if (agentDown)
         {
             OutputLog.Info("agent not running at turn start — restarting");
+            _agentRestartedSinceLastTurn = true;
             await StartAsync();
         }
+
+        var agentRestarted = _agentRestartedSinceLastTurn;
+        _agentRestartedSinceLastTurn = false;
 
         var resumeId = PendingResumeSessionId;
         PendingResumeSessionId = null;
         var forkSession = PendingForkSession;
         PendingForkSession = false;
+
+        // The agent process died (crash, sandbox time limit) while this chat had a live
+        // session. The restarted agent knows nothing about it and would spawn claude with a
+        // fresh --session-id, so the next prompt would land in an empty session while the chat
+        // window still shows the old conversation. Re-resume the same transcript instead.
+        // Skipped when a resume/fork was explicitly requested, or the session never started.
+        if (agentRestarted && resumeId == null && !forkSession && !string.IsNullOrEmpty(CurrentSessionId))
+        {
+            resumeId = CurrentSessionId;
+            _sessionResumedLineage = true;
+            OutputLog.Info($"agent restarted mid-chat — resuming session {resumeId}");
+            onTool?.Invoke("system-info", "", null, "Agent restarted — session resumed.", null);
+        }
 
         // #19: keep a resumed/forked conversation going across turns. The pending
         // resume id is consumed after a single turn (#12 fork semantics), so on the

@@ -546,6 +546,11 @@ The URL links should be relative paths from the working directory.
 
 ## User Selection Context
 The user's IDE selection (if any) is included in the conversation context and marked with ide_selection tags. This represents code or text the user has highlighted in their editor and may or may not be relevant to their request.
+
+## Tool Calls
+Every tool call here has a fixed overhead of a few seconds (security hooks run before and after it, and shell processes start slowly). Use fewer calls:
+- Chain related shell commands into one call (for example `git status && git log -5 --oneline`) instead of one call per command, unless you need to see one result before deciding the next command.
+- Make independent tool calls (reads, searches, commands) in parallel in a single message.
 """;
 
     public async Task StartAsync()

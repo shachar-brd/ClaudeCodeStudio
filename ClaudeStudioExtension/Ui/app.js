@@ -967,6 +967,7 @@ function trustDeny() {
 let _cwdVsPath = "";    // resolved from VS (Solution / Open Folder), via C#
 let _cwdFullPath = "";  // effective cwd shown / copied (override wins when set)
 let _workspaceTrusted = true;  // updated by trust-required / workspace-trusted events
+let _preloadedWorkspace = null; // workspace the "always" preload last ran for
 
 // ── Working directory overrides (D6: per solution) ─────────
 // Overrides live in a map keyed by the VS-resolved workspace path, so switching
@@ -2325,9 +2326,17 @@ function sendMessage() {
     if (window.chrome?.webview) {
         setStreaming(true);
         addLoading();
-        window.chrome.webview.postMessage({
-            type: "chat",
-            text: fullMessage,
+        window.chrome.webview.postMessage(buildChatPayload("chat", fullMessage));
+        _suppressNextAutoResume = false;
+    }
+}
+
+// Everything the agent spawns claude with. A preload sends the same payload
+// (minus the text) so the first real message finds the warm session and reuses it.
+function buildChatPayload(type, text) {
+    return {
+            type,
+            text,
             model: modelSelect.value,
             effort: effortSelect.value || null,
             permissionMode: permissionSelect.value,
@@ -2353,9 +2362,30 @@ function sendMessage() {
             // 0 = wait for the answer (default). A stored value only exists once
             // the user picks a finite timeout in ⚙ → Permissions.
             permissionTimeoutMinutes: (() => { const v = parseInt(localStorage.getItem("permissionTimeoutMinutes") || "0", 10); return Number.isNaN(v) || v < 0 ? 0 : v; })()
-        });
-        _suppressNextAutoResume = false;
-    }
+    };
+}
+
+// ⚙ Preload Claude CLI: start claude before the first message, so its startup
+// (several seconds in a sandbox) overlaps with typing. "session" (default):
+// on New chat and when a session is opened from History; "always": also when
+// the window starts or the solution changes; "never".
+function getPreloadMode() {
+    const v = localStorage.getItem("preloadCli");
+    return v === "never" || v === "always" ? v : "session";
+}
+function setPreloadMode(v) { localStorage.setItem("preloadCli", v); }
+
+// The preload payload for this trigger ("session" | "startup"), or null.
+function preloadPayload(trigger) {
+    const mode = getPreloadMode();
+    if (mode === "never" || (trigger === "startup" && mode !== "always")) return null;
+    return buildChatPayload("preload", "");
+}
+
+function requestPreload(trigger) {
+    if (isStreaming || !window.chrome?.webview) return;
+    const payload = preloadPayload(trigger);
+    if (payload) window.chrome.webview.postMessage(payload);
 }
 
 function addMessage(role, text) {
@@ -2487,6 +2517,12 @@ window.chrome.webview.addEventListener("message", event => {
         _workspaceTrusted = true;
         renderCwd();
         closeTrustModal();
+        // Window start / solution change ("always" only), once per workspace and
+        // only while the chat is still empty.
+        if (userMsgCounter === 0 && !currentSessionId && _preloadedWorkspace !== event.data.path) {
+            _preloadedWorkspace = event.data.path;
+            requestPreload("startup");
+        }
         return;
     }
 
@@ -2559,6 +2595,9 @@ window.chrome.webview.addEventListener("message", event => {
         renderBranchedMessages(event.data.sessionId, event.data.messages || [], event.data.model,
             event.data.lastTurnAt, event.data.contextTokens, event.data.cacheTtlMin);
         hideResumeOverlay();
+        // After the render: it may have switched the model picker to the
+        // session's model, which the preloaded claude must match.
+        requestPreload("session");
         return;
     }
 
@@ -3397,6 +3436,9 @@ const persistentShellToggle = document.getElementById("persistentshell-toggle");
 if (persistentShellToggle) persistentShellToggle.checked = localStorage.getItem("persistentShell") !== "false";
 function setPersistentShell(checked) { localStorage.setItem("persistentShell", checked); }
 
+const preloadCliSelect = document.getElementById("preload-cli-select");
+if (preloadCliSelect) preloadCliSelect.value = getPreloadMode();
+
 const cleanupDaysInput = document.getElementById("cleanup-days-input");
 if (cleanupDaysInput) cleanupDaysInput.value = localStorage.getItem("cleanupPeriodDays") || "";
 function setCleanupDays(value) {
@@ -3687,7 +3729,7 @@ const SETTINGS_KEYS = [
     "showTokens", "showTokenEstimate", "timingMode", "timeUnit", "compactLayout",
     "composerFontSize", "composerTextareaHeight",
     // Claude Code
-    "coAuthoredBy", "autoCompact", "persistentShell", "cleanupPeriodDays", "permissionRules", "claudeCliPath", "fallbackModel", "subagentDetail",
+    "coAuthoredBy", "autoCompact", "persistentShell", "preloadCli", "cleanupPeriodDays", "permissionRules", "claudeCliPath", "fallbackModel", "subagentDetail",
     // Workspace
     "workingDirOverrides", "workingDirectory", "showCwdbar", "statusLineCommand",
     "displayName", "accountInfoSource",
@@ -5032,7 +5074,8 @@ function clearChat() {
     _suppressNextAutoResume = true;
     permissionQueue = [];
 
-    window.chrome.webview.postMessage({ type: "clear" });
+    // The preload rides on "clear" so it runs after the reset, never racing it.
+    window.chrome.webview.postMessage({ type: "clear", preload: preloadPayload("session") });
 }
 
 function renderBranchedMessages(newSessionId, msgs, sessionModel, lastTurnAt, contextTokens, cacheTtlMin) {

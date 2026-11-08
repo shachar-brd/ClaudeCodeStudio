@@ -3,6 +3,10 @@ namespace ClaudeStudioShared;
 public class ChatRequest
 {
     public string Message { get; set; } = "";
+    // Start (or keep) the claude session these settings describe, but send no
+    // message: ⚙ Preload Claude CLI. The next request with the same settings
+    // reuses the warm session.
+    public bool Preload { get; set; }
     public string Model { get; set; } = "claude-sonnet-5";
     public string? Effort { get; set; }
     public string PermissionMode { get; set; } = "ask";

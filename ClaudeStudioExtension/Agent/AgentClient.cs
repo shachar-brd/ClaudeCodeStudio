@@ -444,7 +444,27 @@ public class AgentClient
         }
     }
 
-    private async Task AskStreamingCoreAsync(string message, string model, string? effort, string permissionMode, Action<string> onChunk, Action<string>? onTiming = null, Action<string>? onTokens = null, string? workingDirectory = null, bool autoResume = false, Action<string>? onSession = null, Action<string, string, string?, string?, string?>? onTool = null, Action<string, string?, string, string?>? onPermissionRequest = null, Action<string, string>? onDiagnosticsRequest = null, Action<string>? onThinking = null, decimal? maxBudgetUsd = null, string? fallbackModel = null, Action<ChatChunk>? onSubagentEvent = null, Action<string, string>? onPermissionResolved = null)
+    // Preload (⚙ Preload Claude CLI): has the agent start claude with what the next
+    // AskStreamingAsync will send, without a message. Peeks at the per-turn state
+    // (pending resume/fork, the agent-restart re-resume) instead of consuming it,
+    // so the first real turn builds an identical request and the agent reuses the
+    // warm session. Waits behind a running turn like a send.
+    public async Task PreloadAsync(string model, string? effort, string permissionMode, string? workingDirectory, bool autoResume,
+        decimal? maxBudgetUsd, string? fallbackModel, Action<string>? onSession, Action<string, string, string?, string?, string?>? onTool)
+    {
+        await _streamingSemaphore.WaitAsync();
+        try
+        {
+            await AskStreamingCoreAsync("", model, effort, permissionMode, _ => { }, onTiming: null, onTokens: null,
+                workingDirectory, autoResume, onSession, onTool, maxBudgetUsd: maxBudgetUsd, fallbackModel: fallbackModel, preload: true);
+        }
+        finally
+        {
+            _streamingSemaphore.Release();
+        }
+    }
+
+    private async Task AskStreamingCoreAsync(string message, string model, string? effort, string permissionMode, Action<string> onChunk, Action<string>? onTiming = null, Action<string>? onTokens = null, string? workingDirectory = null, bool autoResume = false, Action<string>? onSession = null, Action<string, string, string?, string?, string?>? onTool = null, Action<string, string?, string, string?>? onPermissionRequest = null, Action<string, string>? onDiagnosticsRequest = null, Action<string>? onThinking = null, decimal? maxBudgetUsd = null, string? fallbackModel = null, Action<ChatChunk>? onSubagentEvent = null, Action<string, string>? onPermissionResolved = null, bool preload = false)
     {
         // A send can queue on the semaphore behind a stuck turn; by the time it
         // runs here, a clear/stop may have nulled the streams (rodada 12: NRE at
@@ -460,13 +480,16 @@ public class AgentClient
             await StartAsync();
         }
 
+        // A preload only peeks: the first real turn must see (and consume) the same state.
         var agentRestarted = _agentRestartedSinceLastTurn;
-        _agentRestartedSinceLastTurn = false;
-
         var resumeId = PendingResumeSessionId;
-        PendingResumeSessionId = null;
         var forkSession = PendingForkSession;
-        PendingForkSession = false;
+        if (!preload)
+        {
+            _agentRestartedSinceLastTurn = false;
+            PendingResumeSessionId = null;
+            PendingForkSession = false;
+        }
 
         // The agent process died (crash, sandbox time limit) while this chat had a live
         // session. The restarted agent knows nothing about it and would spawn claude with a
@@ -476,9 +499,12 @@ public class AgentClient
         if (agentRestarted && resumeId == null && !forkSession && !string.IsNullOrEmpty(CurrentSessionId))
         {
             resumeId = CurrentSessionId;
-            _sessionResumedLineage = true;
-            OutputLog.Info($"agent restarted mid-chat — resuming session {resumeId}");
-            onTool?.Invoke("system-info", "", null, "Agent restarted — session resumed.", null);
+            if (!preload)
+            {
+                _sessionResumedLineage = true;
+                OutputLog.Info($"agent restarted mid-chat — resuming session {resumeId}");
+                onTool?.Invoke("system-info", "", null, "Agent restarted — session resumed.", null);
+            }
         }
 
         // #19: keep a resumed/forked conversation going across turns. The pending
@@ -492,7 +518,9 @@ public class AgentClient
         // forced respawn re-resumes the same transcript instead of starting over.
         // Normal (never-resumed) chats keep resumeId == null and are untouched.
         if (resumeId != null || forkSession)
-            _sessionResumedLineage = true;
+        {
+            if (!preload) _sessionResumedLineage = true;
+        }
         else if (_sessionResumedLineage && CurrentSessionId != null)
             resumeId = CurrentSessionId;
 
@@ -513,6 +541,7 @@ public class AgentClient
         var request = new ChatRequest
         {
             Message = message,
+            Preload = preload,
             Model = model,
             Effort = effort,
             PermissionMode = permissionMode,

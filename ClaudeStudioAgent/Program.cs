@@ -335,6 +335,15 @@ try
             }
         }
 
+        // ⚙ Preload Claude CLI: the session is up (or was already); the next request
+        // with the same settings reuses it.
+        if (request.Preload)
+        {
+            Console.WriteLine(JsonSerializer.Serialize(new ChatChunk { Type = "timing", Text = "preloaded: claude ready for the first message" }));
+            EmitDone();
+            continue;
+        }
+
         try
         {
             await session.SendMessageAsync(request.Message ?? "");

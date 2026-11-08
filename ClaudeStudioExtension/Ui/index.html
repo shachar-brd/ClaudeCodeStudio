@@ -314,6 +314,17 @@
                         </div>
                         <div class="settings-row">
                             <span class="settings-label">
+                                Preload Claude CLI
+                                <span class="info-icon" title="Start claude before you send the first message, so its startup (several seconds, more in a sandbox) happens while you type. On session change: when you press New chat or open a session from History. Always: also when the window opens or the solution changes. A preloaded claude that is never used costs memory but no usage.">ⓘ</span>
+                            </span>
+                            <select id="preload-cli-select" class="settings-select" onchange="setPreloadMode(this.value)">
+                                <option value="never">Never</option>
+                                <option value="session">On session change</option>
+                                <option value="always">Always</option>
+                            </select>
+                        </div>
+                        <div class="settings-row">
+                            <span class="settings-label">
                                 Transcript retention (days)
                                 <span class="info-icon" title="How many days claude keeps chat transcripts before automatic cleanup. Leave blank for the default (30). Applies to new/restarted sessions.">ⓘ</span>
                             </span>

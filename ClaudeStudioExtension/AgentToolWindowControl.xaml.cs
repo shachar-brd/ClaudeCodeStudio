@@ -1261,6 +1261,15 @@ public partial class AgentToolWindowControl : UserControl
                 // branch and rewind can't target it anymore (rodada 12).
                 _agentClient.ResetSession();
                 _sessionStart = DateTime.Now;
+                // ⚙ Preload Claude CLI: carried on "clear" so it runs after the reset.
+                if (request.Preload != null)
+                    await HandlePreloadAsync(request.Preload, currentSolutionDir);
+                return;
+            }
+
+            if (request.Type == "preload")
+            {
+                await HandlePreloadAsync(request, currentSolutionDir);
                 return;
             }
 
@@ -1838,24 +1847,7 @@ public partial class AgentToolWindowControl : UserControl
 
             VsStatusBar.ShowThinking();
 
-            // Explicit CLI path (D7) â€” attached to every outbound request; a
-            // change respawns claude via the session key on the agent side.
-            _agentClient.CliPath = string.IsNullOrWhiteSpace(request.CliPath) ? null : request.CliPath.Trim();
-
-            // User-configurable claude settings (V7). Booleans default to true
-            // when the webview omits them (older payloads).
-            _agentClient.ClaudeSettings = new ClaudeStudioShared.ClaudeSettings
-            {
-                CoAuthoredBy = request.CoAuthoredBy ?? true,
-                CleanupPeriodDays = request.CleanupPeriodDays,
-                AutoCompact = request.AutoCompact ?? true,
-                PersistentShell = request.PersistentShell ?? true,
-                PermissionAllow = request.PermissionAllow,
-                PermissionAsk = request.PermissionAsk,
-                PermissionDeny = request.PermissionDeny,
-                // Omitted by older payloads â†’ 0 â†’ wait for the answer.
-                PermissionTimeoutMinutes = request.PermissionTimeoutMinutes ?? 0
-            };
+            ApplySpawnSettings(request);
 
             // IDE selection context (V11): when the user has text highlighted in
             // the active editor, attach it to the outgoing message in
@@ -4136,6 +4128,79 @@ public partial class AgentToolWindowControl : UserControl
         }
     }
 
+    // What the agent spawns claude with, from the chat (or preload) payload.
+    private void ApplySpawnSettings(WebChatMessage request)
+    {
+        // Explicit CLI path (D7) — attached to every outbound request; a
+        // change respawns claude via the session key on the agent side.
+        _agentClient.CliPath = string.IsNullOrWhiteSpace(request.CliPath) ? null : request.CliPath.Trim();
+
+        // User-configurable claude settings (V7). Booleans default to true
+        // when the webview omits them (older payloads).
+        _agentClient.ClaudeSettings = new ClaudeStudioShared.ClaudeSettings
+        {
+            CoAuthoredBy = request.CoAuthoredBy ?? true,
+            CleanupPeriodDays = request.CleanupPeriodDays,
+            AutoCompact = request.AutoCompact ?? true,
+            PersistentShell = request.PersistentShell ?? true,
+            PermissionAllow = request.PermissionAllow,
+            PermissionAsk = request.PermissionAsk,
+            PermissionDeny = request.PermissionDeny,
+            // Omitted by older payloads → 0 → wait for the answer.
+            PermissionTimeoutMinutes = request.PermissionTimeoutMinutes ?? 0
+        };
+    }
+
+    // ⚙ Preload Claude CLI: starts claude with exactly what the first message
+    // would send, so that message finds the warm session (the agent reuses a
+    // session whose spawn settings match). Every gate a send would show a card for
+    // (sign-in, no workspace, untrusted workspace or MCP servers) just skips the
+    // preload: nothing is spawned that the user has not cleared. Best effort.
+    private async Task HandlePreloadAsync(WebChatMessage request, string? currentSolutionDir)
+    {
+        try
+        {
+            var workingDir = (!string.IsNullOrEmpty(request.WorkingDirectory) && Directory.Exists(request.WorkingDirectory))
+                ? request.WorkingDirectory
+                : currentSolutionDir;
+            string? skip =
+                !IsSignedIn() ? "not signed in" :
+                IsHomeDirectory(workingDir) ? "no workspace" :
+                !string.IsNullOrEmpty(workingDir) && !Trust.TrustedWorkspacesStore.IsTrusted(workingDir) ? "workspace not trusted" :
+                CollectUntrustedMcpServers(workingDir).Count > 0 ? "MCP servers awaiting trust" :
+                _agentClient.IsStreaming ? "a turn is running" : null;
+            if (skip != null)
+            {
+                OutputLog.Info($"preload skipped: {skip}");
+                return;
+            }
+
+            if (!string.Equals(workingDir, _lastWorkingDir, StringComparison.OrdinalIgnoreCase))
+            {
+                await _agentClient.StopAsync();
+                _lastWorkingDir = workingDir;
+            }
+            await _agentClient.StartAsync();
+            ApplySpawnSettings(request);
+
+            var dispatcher = System.Windows.Application.Current.Dispatcher;
+            OutputLog.Info($"preload → model={request.Model} perm={request.PermissionMode} cwd={workingDir ?? "-"}");
+            await _agentClient.PreloadAsync(request.Model, request.Effort, request.PermissionMode, workingDir, request.AutoResume,
+                request.MaxBudgetUsd, string.IsNullOrWhiteSpace(request.FallbackModel) ? null : request.FallbackModel.Trim(),
+                onSession: sid => dispatcher.Invoke(() =>
+                    Browser.CoreWebView2.PostWebMessageAsJson(
+                        JsonSerializer.Serialize(new { type = "session-info", sessionId = sid, resumed = _agentClient.LastTurnResumed }))),
+                // system-info (e.g. the persistent shell refused by the sandbox check)
+                onTool: (kind, name, input, text, id) => dispatcher.Invoke(() =>
+                    Browser.CoreWebView2.PostWebMessageAsJson(
+                        JsonSerializer.Serialize(new { type = kind, name, input, text, id }))));
+        }
+        catch (Exception ex)
+        {
+            OutputLog.Warn($"preload failed: {ex.Message}");
+        }
+    }
+
     // Plain-text and data files no language service reports on.
     private static readonly HashSet<string> NoDiagnosticsExtensions = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -4286,6 +4351,10 @@ public partial class AgentToolWindowControl : UserControl
 
         [JsonPropertyName("persistentShell")]
         public bool? PersistentShell { get; set; }
+
+        // On "clear": the payload to preload claude with afterwards (null = don't).
+        [JsonPropertyName("preload")]
+        public WebChatMessage? Preload { get; set; }
 
         [JsonPropertyName("code")]
         public string? Code { get; set; }

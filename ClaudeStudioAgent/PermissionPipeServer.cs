@@ -306,10 +306,6 @@ internal sealed class PermissionPipeServer : IAsyncDisposable
                 return;
             }
 
-            if (toolName == "Bash" && IsBuildCommand(toolInput)
-                && await TryRunBuildInVsAsync(pipe, toolUseId!, ct))
-                return;
-
             // Rule evaluation first (deny > ask > allow), then the session
             // allowlist short-circuit. An ask-rule match forces the modal even
             // when the tool was session-allowed or has an allow rule.
@@ -424,6 +420,14 @@ internal sealed class PermissionPipeServer : IAsyncDisposable
                 });
             }
 
+            // An approved plain shell build runs in VS instead (Output window, Error
+            // List). Only after approval: the build executes project targets outside
+            // the sandbox, so it must not skip the prompt the shell command gets.
+            if (decision.Allow && toolName is "Bash" or "PowerShell"
+                && BuildCommandParser.TryParse(ExtractCommand(toolInput), cwd, out var buildSpec)
+                && await TryRunBuildInVsAsync(pipe, toolUseId!, buildSpec, ct))
+                return;
+
             var responseObj = new
             {
                 type = "perm_response",
@@ -451,44 +455,34 @@ internal sealed class PermissionPipeServer : IAsyncDisposable
     }
 
     private static readonly TimeSpan BuildTimeout = TimeSpan.FromMinutes(15);
+    private static readonly TimeSpan TestTimeout = TimeSpan.FromMinutes(45);
 
-    // Marker carried in diagnostics_request.Text to ask the extension for a VS build.
-    public const string BuildRequestMarker = "@build";
-
-    private static readonly Regex BuildCommandRegex = new(
-        @"^\s*(dotnet\s+build|dotnet\s+msbuild|msbuild(\.exe)?)(\s|$)",
-        RegexOptions.IgnoreCase | RegexOptions.Compiled);
-
-    // Only plain, single build commands; chained/piped commands run normally.
-    private static bool IsBuildCommand(string? toolInput)
+    private static string? ExtractCommand(string? toolInput)
     {
-        if (string.IsNullOrEmpty(toolInput)) return false;
+        if (string.IsNullOrEmpty(toolInput)) return null;
         try
         {
-            using var doc = JsonDocument.Parse(toolInput);
-            if (!doc.RootElement.TryGetProperty("command", out var c)) return false;
-            var cmd = c.GetString();
-            if (string.IsNullOrWhiteSpace(cmd)) return false;
-            if (cmd.IndexOfAny(new[] { '&', '|', ';', '\n', '>', '<' }) >= 0) return false;
-            return BuildCommandRegex.IsMatch(cmd);
+            using var doc = JsonDocument.Parse(toolInput!);
+            return doc.RootElement.TryGetProperty("command", out var c) && c.ValueKind == JsonValueKind.String
+                ? c.GetString()
+                : null;
         }
-        catch { return false; }
+        catch { return null; }
     }
 
-    // Runs the build inside Visual Studio (visible in its Output window) and hands
-    // the result back to claude as the denial reason, so the shell build never
-    // runs. Returns false (normal permission flow) if VS gave no result.
-    // spec = "@build:<build|rebuild|clean>:<solution|project>:<projectName>"
-    private async Task<string> RequestBuildTextAsync(string requestId, string spec, CancellationToken ct)
+    // Asks the extension to run a VsBridge request (build or test) inside Visual
+    // Studio and waits for the result text. Empty = VS gave no result.
+    private async Task<string> RequestBridgeTextAsync(string requestId, string spec, CancellationToken ct)
     {
         var tcs = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
         if (!_pendingDiag.TryAdd(requestId, tcs)) return "";
 
+        var timeout = spec.StartsWith(VsBridge.TestMarker, StringComparison.Ordinal) ? TestTimeout : BuildTimeout;
         string text = "";
         try
         {
             EmitChunk(new ChatChunk { Type = "diagnostics_request", ToolId = requestId, Text = spec });
-            var completed = await Task.WhenAny(tcs.Task, Task.Delay(BuildTimeout, ct));
+            var completed = await Task.WhenAny(tcs.Task, Task.Delay(timeout, ct));
             if (completed == tcs.Task) text = await tcs.Task;
         }
         catch (OperationCanceledException) { }
@@ -496,14 +490,17 @@ internal sealed class PermissionPipeServer : IAsyncDisposable
         return text;
     }
 
+    // From the MCP server (vs_build / vs_test): spec is an encoded VsBridge request.
     private async Task HandleBuildRequestAsync(NamedPipeServerStream pipe, JsonElement req, CancellationToken ct)
     {
         string Get(string name) => req.TryGetProperty(name, out var v) ? v.GetString() ?? "" : "";
         var id = Get("request_id");
-        var spec = $"{BuildRequestMarker}:{Get("action")}:{Get("scope")}:{Get("project")}";
-        var text = string.IsNullOrEmpty(id) ? "" : await RequestBuildTextAsync(id, spec, ct);
+        var spec = Get("spec");
+        var text = string.IsNullOrEmpty(id) || !VsBridge.IsBridgeRequest(spec)
+            ? ""
+            : await RequestBridgeTextAsync(id, spec, ct);
         if (string.IsNullOrWhiteSpace(text))
-            text = "Visual Studio did not return a build result. Is a solution open in the IDE with the Claude Code Studio window running?";
+            text = "Visual Studio did not return a result. Is a solution open in the IDE with the Claude Code Studio window running?";
 
         var bytes = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(new { type = "build_response", text }) + "\n");
         try
@@ -514,13 +511,16 @@ internal sealed class PermissionPipeServer : IAsyncDisposable
         catch (OperationCanceledException) { }
     }
 
-    private async Task<bool> TryRunBuildInVsAsync(NamedPipeServerStream pipe, string toolUseId, CancellationToken ct)
+    // Runs an approved shell build inside Visual Studio and hands the result back
+    // to claude as the denial reason, so the shell build never runs. Returns false
+    // (the shell command runs as approved) if VS could not take it.
+    private async Task<bool> TryRunBuildInVsAsync(NamedPipeServerStream pipe, string toolUseId, VsBuildSpec spec, CancellationToken ct)
     {
-        var text = await RequestBuildTextAsync(toolUseId, $"{BuildRequestMarker}:build:solution:", ct);
+        var text = await RequestBridgeTextAsync(toolUseId, VsBridge.Encode(spec), ct);
 
         if (string.IsNullOrWhiteSpace(text)) return false;
 
-        var reason = "The shell build was not run. Visual Studio built the solution instead " +
+        var reason = "The shell build was not run. Visual Studio ran it instead " +
                      "(visible in its Output window). Result:\n" + text;
         var responseObj = new { type = "perm_response", tool_use_id = toolUseId, decision = "deny", reason };
         var bytes = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(responseObj) + "\n");

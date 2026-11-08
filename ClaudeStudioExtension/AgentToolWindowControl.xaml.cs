@@ -268,6 +268,9 @@ public partial class AgentToolWindowControl : UserControl
         if (action != EnvDTE.vsBuildAction.vsBuildActionBuild &&
             action != EnvDTE.vsBuildAction.vsBuildActionRebuildAll)
             return;
+        // vs_build / vs_test already return the result to claude.
+        if (_bridgeBuildActive)
+            return;
 
         var failedProjects = 0;
         string? cwd = null;
@@ -4083,154 +4086,27 @@ public partial class AgentToolWindowControl : UserControl
         }
     }
 
-    // Builds the open solution through VS (output appears in the Build pane) and
-    // returns a summary plus Error List entries. Empty string = could not build.
-    private async Task<string> RunVsBuildAsync(string spec)
-    {
-        await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
-
-        var parts = spec.Split(':');
-        var action = parts.Length > 1 && parts[1].Length > 0 ? parts[1] : "build";
-        var scope = parts.Length > 2 && parts[2].Length > 0 ? parts[2] : "solution";
-        var projectName = parts.Length > 3 ? parts[3] : "";
-
-        var dte = Package.GetGlobalService(typeof(EnvDTE.DTE)) as EnvDTE.DTE;
-        if (dte?.Solution == null || string.IsNullOrEmpty(dte.Solution.FullName))
-            return "";
-
-        var build = dte.Solution.SolutionBuild;
-        var config = build.ActiveConfiguration?.Name ?? "Debug";
-
-        string? uniqueName = null;
-        if (scope == "project")
-        {
-            uniqueName = FindProjectUniqueName(dte.Solution.Projects, projectName);
-            if (uniqueName == null)
-                return $"Project '{projectName}' was not found in the open solution.";
-        }
-
-        ShowBuildOutputPane(dte);
-
-        var steps = action == "rebuild" ? new[] { "clean", "build" } : new[] { action };
-        foreach (var step in steps)
-        {
-            var done = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-            EnvDTE._dispBuildEvents_OnBuildDoneEventHandler handler = (s, a) => done.TrySetResult(true);
-            dte.Events.BuildEvents.OnBuildDone += handler;
-            try
-            {
-                if (scope == "solution")
-                {
-                    if (step == "clean") build.Clean(false); else build.Build(false);
-                }
-                else if (step == "build")
-                {
-                    build.BuildProject(config, uniqueName, false);
-                }
-                else
-                {
-                    CleanProject(uniqueName!);
-                }
-                ShowBuildOutputPane(dte);
-                await done.Task;
-            }
-            finally { dte.Events.BuildEvents.OnBuildDone -= handler; }
-        }
-
-        var target = scope == "project" ? $"project {projectName}" : "solution";
-        if (action == "clean")
-            return $"Clean of {target} completed.";
-
-        // Let the Error List catch up with the finished build.
-        await Task.Delay(700);
-
-        var failed = build.LastBuildInfo;
-        var (errors, warnings, prompt) = await Diagnostics.ErrorListReader.ReadAllAsync(_lastWorkingDir);
-        var verb = action == "rebuild" ? "Rebuild" : "Build";
-        if (failed == 0 && errors == 0)
-            return $"{verb} of {target} succeeded ({warnings} warning(s)).";
-        if (errors == 0)
-            return $"{verb} of {target} failed in {failed} project(s) but the Error List has no errors; check the VS Output window.";
-        return prompt;
-    }
-
-    // Brings up the Output window with the "Build" pane selected, so the user
-    // watches the build in the same place as when pressing Build themselves.
-    private static void ShowBuildOutputPane(EnvDTE.DTE dte)
-    {
-        ThreadHelper.ThrowIfNotOnUIThread();
-        try
-        {
-            dte.ExecuteCommand("View.Output");
-            var window = dte.Windows.Item(EnvDTE.Constants.vsWindowKindOutput);
-            window.Visible = true;
-            var output = (EnvDTE.OutputWindow)window.Object;
-            foreach (EnvDTE.OutputWindowPane pane in output.OutputWindowPanes)
-            {
-                if (pane.Guid.Equals("{1BD8A850-02D1-11D1-BEE7-00A0C913D1F8}", StringComparison.OrdinalIgnoreCase))
-                {
-                    pane.Activate();
-                    return;
-                }
-            }
-        }
-        catch (Exception ex)
-        {
-            OutputLog.Warn($"could not select the Build output pane: {ex.Message}");
-        }
-    }
-
-    private static string? FindProjectUniqueName(EnvDTE.Projects projects, string name)
-    {
-        ThreadHelper.ThrowIfNotOnUIThread();
-        foreach (EnvDTE.Project p in projects)
-        {
-            var found = FindProjectUniqueName(p, name);
-            if (found != null) return found;
-        }
-        return null;
-    }
-
-    private static string? FindProjectUniqueName(EnvDTE.Project? p, string name)
-    {
-        ThreadHelper.ThrowIfNotOnUIThread();
-        if (p == null) return null;
-        if (p.Kind == "{66A26720-8FB5-11D2-AA7E-00C04F688DDE}") // solution folder
-        {
-            if (p.ProjectItems == null) return null;
-            foreach (EnvDTE.ProjectItem item in p.ProjectItems)
-            {
-                var found = FindProjectUniqueName(item.SubProject, name);
-                if (found != null) return found;
-            }
-            return null;
-        }
-        return string.Equals(p.Name, name, StringComparison.OrdinalIgnoreCase) ? p.UniqueName : null;
-    }
-
-    private static void CleanProject(string uniqueName)
-    {
-        ThreadHelper.ThrowIfNotOnUIThread();
-        var sln = (Microsoft.VisualStudio.Shell.Interop.IVsSolution)Package.GetGlobalService(typeof(Microsoft.VisualStudio.Shell.Interop.SVsSolution));
-        sln.GetProjectOfUniqueName(uniqueName, out var hier);
-        var mgr = (Microsoft.VisualStudio.Shell.Interop.IVsSolutionBuildManager2)Package.GetGlobalService(typeof(Microsoft.VisualStudio.Shell.Interop.SVsSolutionBuildManager));
-        mgr.StartSimpleUpdateProjectConfiguration(hier, null, null,
-            (uint)Microsoft.VisualStudio.Shell.Interop.VSSOLNBUILDUPDATEFLAGS.SBF_OPERATION_CLEAN, 0, 0);
-    }
-
     // Handles a diagnostics_request from the agent's PostToolUse hook: give VS a
     // moment to re-analyze the just-edited file, read its Error List entries, and
     // send them back so the (blocked) hook can surface them to claude. Never
     // throws â€” on any failure the agent's hook times out and just adds no context.
     private async Task HandleDiagnosticsRequestAsync(string filePath, string requestId)
     {
-        if (filePath.StartsWith("@build"))
+        if (ClaudeStudioShared.VsBridge.IsBridgeRequest(filePath))
         {
             string result;
-            try { result = await RunVsBuildAsync(filePath); }
+            try
+            {
+                if (ClaudeStudioShared.VsBridge.TryDecode(filePath, out ClaudeStudioShared.VsBuildSpec buildSpec))
+                    result = await RunVsBuildAsync(buildSpec);
+                else if (ClaudeStudioShared.VsBridge.TryDecode(filePath, out ClaudeStudioShared.VsTestSpec testSpec))
+                    result = await RunVsTestAsync(testSpec);
+                else
+                    result = "";
+            }
             catch (Exception ex)
             {
-                OutputLog.Warn($"VS build request failed: {ex.Message}");
+                OutputLog.Warn($"VS bridge request failed: {ex.Message}");
                 result = "";
             }
             try { await _agentClient.SendDiagnosticsResponseAsync(requestId, result); } catch { }

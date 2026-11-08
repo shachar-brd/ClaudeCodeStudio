@@ -858,12 +858,21 @@ The user's IDE selection (if any) is included in the conversation context and ma
             // enough wall-clock for a launch-time flag rejection to have already
             // exited the main process — so the HasExited check right after is a free
             // detection window, with no artificial delay added to the healthy path.
-            var claudeVersion = await ProbeClaudeAsync(psi.FileName);
+            // Skipped when this exact exe already started with these flags (the
+            // probe is a second start of claude, slow in a sandbox): no rejection
+            // can come, and the version is cached.
+            var knownLaunch = ClaudeLaunchCache.TryGetKnownLaunch(psi.FileName, plannedArgs, out var claudeVersion);
+            if (!knownLaunch)
+                claudeVersion = await ProbeClaudeAsync(psi.FileName);
+            else
+                EmitTiming("claude version probe skipped (known exe and flags)", sw.ElapsedMilliseconds);
 
             if (!_proc.HasExited)
             {
                 // Healthy: claude is up and blocked waiting for the first stdin line.
                 _claudeVersion = claudeVersion;
+                if (!knownLaunch)
+                    ClaudeLaunchCache.RecordLaunch(psi.FileName, plannedArgs, claudeVersion);
                 var exeLabel = claudeVersion != null ? $"{psi.FileName} ({claudeVersion})" : psi.FileName;
                 Console.WriteLine(JsonSerializer.Serialize(new ChatChunk { Type = "timing", Text = $"claude exe: {exeLabel}" }));
                 Console.Out.Flush();

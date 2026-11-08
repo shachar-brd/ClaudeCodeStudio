@@ -598,6 +598,24 @@ Every tool call here has a fixed overhead of a few seconds (security hooks run b
         // plain CLI / official VS Code usage in claude's logs and telemetry.
         psi.EnvironmentVariables["CLAUDE_CODE_ENTRYPOINT"] = "claude-vs2022";
 
+        // Fewer processes per claude call (each costs ~250 ms more in a sandbox):
+        // claude finds git with `where git`, usually Git's cmd\git.exe launcher,
+        // which starts mingw64\bin\git.exe; putting that first (as Git Bash does)
+        // halves its bookkeeping git calls. And a native rg.exe for Grep/Glob instead
+        // of claude re-starting its own large binary as ripgrep.
+        var claudePath = psi.EnvironmentVariables["PATH"] ?? "";
+        if (PersistentShellPool.FindGitBash() is { } gitBash && PersistentShellPool.MingwBin(gitBash) is { } mingw
+            && !claudePath.StartsWith(mingw + ";", StringComparison.OrdinalIgnoreCase))
+            claudePath = mingw + ";" + claudePath;
+        if (string.IsNullOrEmpty(Environment.GetEnvironmentVariable("USE_BUILTIN_RIPGREP")) && FindRipgrep(claudePath) is { } rgDir)
+        {
+            if (!PathHasDir(claudePath, rgDir)) claudePath = claudePath + ";" + rgDir;
+            psi.EnvironmentVariables["USE_BUILTIN_RIPGREP"] = "0";
+        }
+        psi.EnvironmentVariables["PATH"] = claudePath;
+        EmitTiming($"claude PATH: git {(claudePath.Contains(@"\mingw64\bin;", StringComparison.OrdinalIgnoreCase) ? "mingw64\\bin first" : "unchanged")}, " +
+                   $"ripgrep {(psi.EnvironmentVariables["USE_BUILTIN_RIPGREP"] == "0" ? "system rg.exe" : "built-in")}", sw.ElapsedMilliseconds);
+
         psi.ArgumentList.Add("--input-format");
         psi.ArgumentList.Add("stream-json");
         psi.ArgumentList.Add("--output-format");
@@ -981,6 +999,31 @@ Every tool call here has a fixed overhead of a few seconds (security hooks run b
         }
         if (registerControlHooks || shellBash != null)
             await InitializeControlChannelAsync(sw, registerControlHooks);
+    }
+
+    private static bool PathHasDir(string path, string dir) =>
+        path.Split(';').Any(d => string.Equals(d.Trim().TrimEnd('\\'), dir.TrimEnd('\\'), StringComparison.OrdinalIgnoreCase));
+
+    // Folder of an rg.exe: on PATH, else on the user/machine PATH from the
+    // registry (a winget install after VS started is not in our inherited PATH
+    // yet), else winget's links folder. null when there is none: claude then
+    // keeps its built-in ripgrep, since USE_BUILTIN_RIPGREP=0 without an rg would
+    // break Grep and Glob.
+    private static string? FindRipgrep(string path)
+    {
+        IEnumerable<string> Dirs(string? p) => (p ?? "").Split(';').Select(d => Environment.ExpandEnvironmentVariables(d.Trim())).Where(d => d.Length > 0);
+        var candidates = Dirs(path).ToList();
+        if (OperatingSystem.IsWindows())
+        {
+            try { candidates.AddRange(Dirs(Microsoft.Win32.Registry.GetValue(@"HKEY_CURRENT_USER\Environment", "Path", null) as string)); } catch { }
+            try { candidates.AddRange(Dirs(Microsoft.Win32.Registry.GetValue(@"HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\Session Manager\Environment", "Path", null) as string)); } catch { }
+        }
+        candidates.Add(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Microsoft", "WinGet", "Links"));
+        foreach (var dir in candidates)
+        {
+            try { if (File.Exists(Path.Combine(dir, "rg.exe"))) return dir; } catch { }
+        }
+        return null;
     }
 
     // null when a shell the agent starts is as contained as claude; else why not.

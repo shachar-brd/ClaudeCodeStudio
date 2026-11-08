@@ -33,7 +33,7 @@ public class PersistentShellTests : IAsyncLifetime
     public async Task Runs_a_command_and_returns_its_output()
     {
         RequireBash();
-        var r = await _shell.RunAsync("echo hello; echo world", T);
+        var r = await _shell.RunAsync("echo hello; echo world", T, TestContext.Current.CancellationToken);
         Assert.Equal("hello\nworld", r.Output);
         Assert.Equal(0, r.ExitCode);
         Assert.False(r.TimedOut);
@@ -44,16 +44,16 @@ public class PersistentShellTests : IAsyncLifetime
     public async Task Output_without_a_trailing_newline_is_kept()
     {
         RequireBash();
-        Assert.Equal("abc", (await _shell.RunAsync("printf abc", T)).Output);
-        Assert.Equal("", (await _shell.RunAsync("true", T)).Output);
-        Assert.Equal("\nx", (await _shell.RunAsync("printf '\\nx\\n'", T)).Output);
+        Assert.Equal("abc", (await _shell.RunAsync("printf abc", T, TestContext.Current.CancellationToken)).Output);
+        Assert.Equal("", (await _shell.RunAsync("true", T, TestContext.Current.CancellationToken)).Output);
+        Assert.Equal("\nx", (await _shell.RunAsync("printf '\\nx\\n'", T, TestContext.Current.CancellationToken)).Output);
     }
 
     [Fact]
     public async Task Reports_the_exit_code_and_stderr()
     {
         RequireBash();
-        var r = await _shell.RunAsync("echo oops >&2; false", T);
+        var r = await _shell.RunAsync("echo oops >&2; false", T, TestContext.Current.CancellationToken);
         Assert.Equal(1, r.ExitCode);
         Assert.Equal("oops", r.Output);
     }
@@ -62,9 +62,9 @@ public class PersistentShellTests : IAsyncLifetime
     public async Task Quoting_reaches_bash_unchanged()
     {
         RequireBash();
-        var r = await _shell.RunAsync("x='a \"b\" $HOME'; printf '%s|' \"$x\" 'c\\d' \"e'f\"", T);
+        var r = await _shell.RunAsync("x='a \"b\" $HOME'; printf '%s|' \"$x\" 'c\\d' \"e'f\"", T, TestContext.Current.CancellationToken);
         Assert.Equal("a \"b\" $HOME|c\\d|e'f|", r.Output);
-        var heredoc = await _shell.RunAsync("cat <<'EOF'\nline1\n  line2\nEOF", T);
+        var heredoc = await _shell.RunAsync("cat <<'EOF'\nline1\n  line2\nEOF", T, TestContext.Current.CancellationToken);
         Assert.Equal("line1\n  line2", heredoc.Output);
     }
 
@@ -72,8 +72,8 @@ public class PersistentShellTests : IAsyncLifetime
     public async Task Directory_and_exports_persist_between_commands()
     {
         RequireBash();
-        await _shell.RunAsync("mkdir -p sub && cd sub && export CS_TEST_VAR=42", T);
-        var r = await _shell.RunAsync("basename \"$PWD\"; echo $CS_TEST_VAR", T);
+        await _shell.RunAsync("mkdir -p sub && cd sub && export CS_TEST_VAR=42", T, TestContext.Current.CancellationToken);
+        var r = await _shell.RunAsync("basename \"$PWD\"; echo $CS_TEST_VAR", T, TestContext.Current.CancellationToken);
         Assert.Equal("sub\n42", r.Output);
     }
 
@@ -81,7 +81,7 @@ public class PersistentShellTests : IAsyncLifetime
     public async Task Starts_in_the_working_directory()
     {
         RequireBash();
-        var r = await _shell.RunAsync("pwd -W", T);
+        var r = await _shell.RunAsync("pwd -W", T, TestContext.Current.CancellationToken);
         Assert.Equal(Path.GetFullPath(_dir).TrimEnd('\\'), r.Output.Replace('/', '\\'), ignoreCase: true);
     }
 
@@ -89,7 +89,7 @@ public class PersistentShellTests : IAsyncLifetime
     public async Task Stdin_is_empty_so_reading_commands_do_not_hang()
     {
         RequireBash();
-        var r = await _shell.RunAsync("cat; read -r x; echo \"after:$x\"", T);
+        var r = await _shell.RunAsync("cat; read -r x; echo \"after:$x\"", T, TestContext.Current.CancellationToken);
         Assert.Equal("after:", r.Output);
     }
 
@@ -97,12 +97,12 @@ public class PersistentShellTests : IAsyncLifetime
     public async Task Exit_ends_the_shell_and_the_next_command_gets_a_fresh_one()
     {
         RequireBash();
-        await _shell.RunAsync("export CS_GONE=1", T);
-        var r = await _shell.RunAsync("echo bye; exit 3", T);
+        await _shell.RunAsync("export CS_GONE=1", T, TestContext.Current.CancellationToken);
+        var r = await _shell.RunAsync("echo bye; exit 3", T, TestContext.Current.CancellationToken);
         Assert.True(r.ShellEnded);
         Assert.Equal(3, r.ExitCode);
         Assert.Equal("bye", r.Output);
-        var next = await _shell.RunAsync("echo \"[$CS_GONE]\"", T);
+        var next = await _shell.RunAsync("echo \"[$CS_GONE]\"", T, TestContext.Current.CancellationToken);
         Assert.Equal("[]", next.Output);
         Assert.Equal(0, next.ExitCode);
     }
@@ -111,8 +111,8 @@ public class PersistentShellTests : IAsyncLifetime
     public async Task Set_e_from_a_command_does_not_leak_into_the_next()
     {
         RequireBash();
-        await _shell.RunAsync("set -e", T);
-        var r = await _shell.RunAsync("false; echo still-here", T);
+        await _shell.RunAsync("set -e", T, TestContext.Current.CancellationToken);
+        var r = await _shell.RunAsync("false; echo still-here", T, TestContext.Current.CancellationToken);
         Assert.Equal("still-here", r.Output);
         Assert.False(r.ShellEnded);
     }
@@ -122,22 +122,58 @@ public class PersistentShellTests : IAsyncLifetime
     {
         RequireBash();
         var sw = Stopwatch.StartNew();
-        var r = await _shell.RunAsync("echo started; sleep 30", TimeSpan.FromSeconds(2));
+        var r = await _shell.RunAsync("echo started; sleep 30", TimeSpan.FromSeconds(2), TestContext.Current.CancellationToken);
         Assert.True(r.TimedOut);
         Assert.Equal("started", r.Output);
         Assert.True(sw.Elapsed < TimeSpan.FromSeconds(15));
-        Assert.Equal("ok", (await _shell.RunAsync("echo ok", T)).Output);
+        Assert.Equal("ok", (await _shell.RunAsync("echo ok", T, TestContext.Current.CancellationToken)).Output);
     }
 
     [Fact]
     public async Task Long_output_keeps_head_and_tail()
     {
         RequireBash();
-        var r = await _shell.RunAsync("seq 1 20000", T);
+        var r = await _shell.RunAsync("seq 1 20000", T, TestContext.Current.CancellationToken);
         Assert.StartsWith("1\n2\n", r.Output);
         Assert.EndsWith("19999\n20000", r.Output);
         Assert.Contains("characters truncated", r.Output);
         Assert.True(r.Output.Length < 32000);
+    }
+
+    [Fact]
+    public async Task Second_shell_loads_the_login_environment_without_the_profile()
+    {
+        RequireBash();
+        const string probe = "echo \"$MSYSTEM|$PATH\"; type -t git >/dev/null && echo has-git";
+        var first = await _shell.RunAsync(probe, T, TestContext.Current.CancellationToken); // login shell, or a snapshot from an earlier run
+        await using var second = new PersistentShell(Bash!, _dir);
+        var again = await second.RunAsync(probe + "; shopt -q login_shell && echo login || echo no-login", T, TestContext.Current.CancellationToken);
+        Assert.True(second.LoadedFromSnapshot);
+        Assert.Equal(first.Output + "\nno-login", again.Output);
+        Assert.Contains("MINGW64|", again.Output);
+        Assert.Contains("has-git", again.Output);
+        Assert.Equal("[ok]", (await second.RunAsync("f() { echo \"[$1]\"; }; f ok", T, TestContext.Current.CancellationToken)).Output);
+    }
+
+    [Fact]
+    public async Task Per_launch_variables_do_not_change_the_snapshot_and_keep_their_value()
+    {
+        RequireBash();
+        const string name = "CS_TEST_SessionKey";
+        try
+        {
+            Environment.SetEnvironmentVariable(name, "first");
+            await using (var a = new PersistentShell(Bash!, _dir))
+                Assert.Equal("first", (await a.RunAsync($"echo ${name}", T, TestContext.Current.CancellationToken)).Output);
+            Environment.SetEnvironmentVariable(name, "second");
+            await using var b = new PersistentShell(Bash!, _dir);
+            Assert.Equal("second", (await b.RunAsync($"echo ${name}", T, TestContext.Current.CancellationToken)).Output);
+            Assert.True(b.LoadedFromSnapshot);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(name, null);
+        }
     }
 
     [Fact]

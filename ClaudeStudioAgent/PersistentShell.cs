@@ -13,9 +13,9 @@ namespace ClaudeStudioAgent;
 // Each command is sent on bash's stdin as a quoted here-doc read into a
 // variable (no escaping needed), then eval'd with stdin from /dev/null (a
 // command can never read the next one) and stderr folded into stdout, followed
-// by a marker line with a random nonce and the exit code. The shell is a login
-// shell (same PATH/env as Git Bash) started once; cd and exported variables
-// persist between commands. A command that ends the shell (exit, exec, set -e)
+// by a marker line with a random nonce and the exit code. The shell has the
+// environment of a Git Bash login shell (run once, then loaded from
+// ShellEnvSnapshot); cd and exported variables persist between commands. A command that ends the shell (exit, exec, set -e)
 // or times out kills its process tree; the next command starts a fresh shell.
 internal sealed class PersistentShell : IAsyncDisposable
 {
@@ -79,7 +79,6 @@ internal sealed class PersistentShell : IAsyncDisposable
         // usr\bin\bash.exe directly (one process, not Git's bin\ launcher): set
         // what the launcher would, so the login profile builds the usual PATH and
         // stays in the working directory.
-        psi.ArgumentList.Add("-l");
         psi.Environment["MSYSTEM"] = "MINGW64";
         psi.Environment["CHERE_INVOKING"] = "1";
         // Nothing may wait for a human: no editor, pager or credential prompt.
@@ -87,6 +86,22 @@ internal sealed class PersistentShell : IAsyncDisposable
         psi.Environment["GIT_PAGER"] = "cat";
         psi.Environment["PAGER"] = "cat";
         psi.Environment["GIT_TERMINAL_PROMPT"] = "0";
+
+        // The login profile forks ~19 times, and under MSYS every fork is a new
+        // Windows process (3.3 s for a login shell in the Sandboxie box). So the
+        // environment it produces is saved once and loaded into a --noprofile shell
+        // with builtins only (no forks); the profile runs again only when its
+        // files, the Git install or the inherited environment change.
+        var snapshot = ShellEnvSnapshot.For(_bashPath, psi.Environment);
+        if (snapshot.Exists)
+        {
+            psi.ArgumentList.Add("--noprofile");
+            psi.ArgumentList.Add("--norc");
+        }
+        else
+        {
+            psi.ArgumentList.Add("-l");
+        }
 
         var proc = Process.Start(psi) ?? throw new InvalidOperationException("could not start " + _bashPath);
         var refused = _verify?.Invoke(proc.Id);
@@ -104,6 +119,21 @@ internal sealed class PersistentShell : IAsyncDisposable
         });
 
         var ready = "__CS_READY_" + Guid.NewGuid().ToString("N");
+        string? dumpTo = null;
+        if (snapshot.Exists)
+        {
+            // PWD, SHLVL and the volatile variables describe this shell, not the one
+            // the snapshot came from.
+            var (save, restore) = ShellEnvSnapshot.VolatileGuard(snapshot.Volatile);
+            await stdin.WriteAsync("__cs_pwd=$PWD; __cs_lvl=$SHLVL; " + save +
+                                   $"source '{ShellEnvSnapshot.BashPath(snapshot.Path)}' >/dev/null 2>&1; " +
+                                   "PWD=$__cs_pwd; SHLVL=$__cs_lvl; " + restore + "unset OLDPWD __cs_pwd __cs_lvl\n");
+        }
+        else
+        {
+            dumpTo = snapshot.Path + "." + Guid.NewGuid().ToString("N") + ".tmp";
+            await stdin.WriteAsync($"{{ declare -px; declare -f; alias -p; shopt -p; }} > '{ShellEnvSnapshot.BashPath(dumpTo)}' 2>/dev/null\n");
+        }
         await stdin.WriteAsync($"printf '%s\\n' {ready}\n");
         await stdin.FlushAsync();
         using var cts = new CancellationTokenSource(StartTimeout);
@@ -121,10 +151,16 @@ internal sealed class PersistentShell : IAsyncDisposable
             throw new TimeoutException($"{_bashPath} did not start within {StartTimeout.TotalSeconds:F0}s");
         }
 
+        if (dumpTo != null) ShellEnvSnapshot.Commit(dumpTo, snapshot.Path);
+
         _proc = proc;
         _stdin = stdin;
         _stdout = stdout;
+        LoadedFromSnapshot = snapshot.Exists;
     }
+
+    // For the log: whether the current shell skipped the login profile.
+    public bool LoadedFromSnapshot { get; private set; }
 
     public async Task<Result> RunAsync(string command, TimeSpan timeout, CancellationToken ct = default)
     {
@@ -346,5 +382,129 @@ internal sealed class PersistentShellPool : IAsyncDisposable
         }
 
         return UsrBash(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "Git"));
+    }
+
+    // <git root>\mingw64\bin for a <git root>\usr\bin\bash.exe, or null.
+    public static string? MingwBin(string usrBash)
+    {
+        try
+        {
+            var root = Path.GetDirectoryName(Path.GetDirectoryName(Path.GetDirectoryName(usrBash)));
+            var dir = root == null ? null : Path.Combine(root, "mingw64", "bin");
+            return dir != null && File.Exists(Path.Combine(dir, "git.exe")) ? dir : null;
+        }
+        catch { return null; }
+    }
+}
+
+// The environment a Git Bash login shell ends up with (exported variables,
+// functions, aliases, shopt), saved by `declare -px; declare -f; alias -p;
+// shopt -p` from a login shell and sourced by later --noprofile shells. Keyed by
+// everything that can change what the profile produces: the bash binary, the
+// profile files (system and user) and the environment the shell inherits.
+internal static class ShellEnvSnapshot
+{
+    // Bump when the dump or load commands change.
+    private const string Format = "1";
+
+    // Volatile: names of inherited variables that change per launch (VS sets a
+    // new ServiceHub pipe and log key every start; dotnet a telemetry session id).
+    // They are left out of the key, so a VS restart does not force the profile
+    // again, and restored after loading, so a stale value never leaks in.
+    public readonly record struct Entry(string Path, bool Exists, IReadOnlyList<string> Volatile);
+
+    public static bool IsVolatile(string name) =>
+        name.EndsWith("PipeName", StringComparison.OrdinalIgnoreCase) ||
+        name.IndexOf("SessionKey", StringComparison.OrdinalIgnoreCase) >= 0 ||
+        name.IndexOf("SESSIONID", StringComparison.OrdinalIgnoreCase) >= 0;
+
+    // Bash that saves the volatile variables before `source` and restores them after.
+    public static (string save, string restore) VolatileGuard(IReadOnlyList<string> names)
+    {
+        var save = new StringBuilder();
+        var restore = new StringBuilder();
+        for (var i = 0; i < names.Count; i++)
+        {
+            // Only names that are valid shell identifiers can be handled (and set).
+            if (!System.Text.RegularExpressions.Regex.IsMatch(names[i], "^[A-Za-z_][A-Za-z0-9_]*$")) continue;
+            save.Append($"__cs_v{i}=${{{names[i]}}}; ");
+            restore.Append($"{names[i]}=$__cs_v{i}; unset __cs_v{i}; ");
+        }
+        return (save.ToString(), restore.ToString());
+    }
+
+    public static Entry For(string bashPath, IDictionary<string, string?> env)
+    {
+        var sb = new StringBuilder(Format).Append('\n');
+        void Stat(string path)
+        {
+            try
+            {
+                var fi = new FileInfo(path);
+                sb.Append(path).Append('|').Append(fi.Exists ? $"{fi.Length}|{fi.LastWriteTimeUtc.Ticks}" : "-").Append('\n');
+            }
+            catch { sb.Append(path).Append("|?\n"); }
+        }
+
+        Stat(bashPath);
+        var root = Path.GetDirectoryName(Path.GetDirectoryName(Path.GetDirectoryName(bashPath)));
+        if (root != null)
+        {
+            var etc = Path.Combine(root, "etc");
+            Stat(Path.Combine(etc, "profile"));
+            Stat(Path.Combine(etc, "bash.bashrc"));
+            try
+            {
+                var pd = Path.Combine(etc, "profile.d");
+                if (Directory.Exists(pd))
+                    foreach (var f in Directory.GetFiles(pd).OrderBy(f => f, StringComparer.OrdinalIgnoreCase)) Stat(f);
+            }
+            catch { }
+        }
+        var home = env.TryGetValue("HOME", out var h) && !string.IsNullOrEmpty(h) ? h!
+            : env.TryGetValue("USERPROFILE", out var u) && !string.IsNullOrEmpty(u) ? u! : null;
+        if (home != null)
+            foreach (var f in new[] { ".bash_profile", ".bash_login", ".profile", ".bashrc" })
+                Stat(Path.Combine(home, f));
+        var volatileNames = new List<string>();
+        foreach (var kv in env.OrderBy(kv => kv.Key, StringComparer.OrdinalIgnoreCase))
+        {
+            if (IsVolatile(kv.Key)) { volatileNames.Add(kv.Key); continue; }
+            sb.Append(kv.Key).Append('=').Append(kv.Value).Append('\n');
+        }
+
+        var hash = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes(sb.ToString())))[..16];
+        EnsureDir();
+        var path = System.IO.Path.Combine(Dir, $"env-{hash}.sh");
+        bool exists;
+        try { exists = new FileInfo(path).Length > 0; } catch { exists = false; }
+        return new Entry(path, exists, volatileNames);
+    }
+
+    private static string Dir => Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "ClaudeStudio", "shell-env");
+
+    // C:\a\b -> C:/a/b, which MSYS bash accepts in redirects and `source`.
+    public static string BashPath(string windowsPath) => windowsPath.Replace('\\', '/');
+
+    // Moves a finished dump into place and drops snapshots unused for 30 days.
+    public static void Commit(string tmp, string path)
+    {
+        try
+        {
+            if (!File.Exists(tmp) || new FileInfo(tmp).Length == 0) { File.Delete(tmp); return; }
+            File.Move(tmp, path, overwrite: true);
+            foreach (var old in Directory.GetFiles(Dir, "env-*"))
+                if (File.GetLastWriteTimeUtc(old) < DateTime.UtcNow.AddDays(-30)) File.Delete(old);
+        }
+        catch
+        {
+            try { File.Delete(tmp); } catch { }
+        }
+    }
+
+    private static void EnsureDir()
+    {
+        try { Directory.CreateDirectory(Dir); } catch { }
     }
 }

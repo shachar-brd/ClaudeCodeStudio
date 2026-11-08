@@ -17,8 +17,8 @@
 
             <div class="topbar-right">
                 <div class="actions">
-                    <button class="action-btn" id="btn-layout" title="Toggle layout" onclick="toggleLayout()">◫</button>
-                    <button class="action-btn" id="btn-diff" title="Git diff" onclick="openDiffModal()">⎇</button>
+                    <button class="action-btn new-chat" id="btn-new-chat" title="New chat">✎</button>
+                    <button class="action-btn" id="btn-diff" title="Git diff" onclick="openDiffModal()">&#9095;</button>
                     <button class="action-btn" id="btn-usage" title="Usage & cost" onclick="openUsageWindow()">
                         <svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round">
                             <rect x="2" y="9.5"  width="3" height="4.5"/>
@@ -97,6 +97,20 @@
                         <div class="cmd-section">Custom</div>
                         <div id="custom-cmd-list"></div>
                         <div class="cmd-item cmd-add" onclick="openAddCommand()">＋ Add command…</div>
+                    </div>
+                </div>
+                <div class="cmd-wrap" id="info-wrap">
+                    <button class="cmd-trigger" title="Account and project info" onclick="toggleInfoMenu()">ⓘ</button>
+                    <div class="cmd-menu info-menu" id="info-menu">
+                        <div class="cmd-section">Account</div>
+                        <div class="info-row"><span id="account-info" class="account-info account-info-loading" title="">···</span></div>
+                        <div class="cmd-divider"></div>
+                        <div class="cmd-section">Project</div>
+                        <div class="cwdbar cwdbar-empty" id="cwdbar" onclick="copyCwd()" title="">
+                            <span class="cwdbar-icon">📁</span>
+                            <span class="cwdbar-path" id="cwdbar-path">No workspace</span>
+                            <span class="cwdbar-presence" id="cwdbar-presence" hidden></span>
+                        </div>
                     </div>
                 </div>
                 <div class="cmd-wrap" id="settings-wrap">
@@ -471,42 +485,8 @@
             </div>
         </div>
 
-        <div class="titlebar">
-            <span id="account-info" class="account-info account-info-loading" title="">···</span>
-            <div class="titlebar-right">
-                <!-- Hidden native select stays as the single source of truth for the
-                     model id — send payload, caption, /model card and localStorage all
-                     read/write it. The visible control is the effort-style button. -->
-                <select class="model-select" hidden>
-                    <option value="claude-sonnet-5"           title="Sonnet 5 · claude-sonnet-5">Sonnet 5</option>
-                    <option value="claude-sonnet-4-6"         title="Sonnet 4.6 · claude-sonnet-4-6">Sonnet 4.6</option>
-                    <option value="claude-opus-5-5"           title="Opus 5.5 · claude-opus-5-5">Opus 5.5</option>
-                    <option value="claude-opus-5"             title="Opus 5 · claude-opus-5">Opus 5</option>
-                    <option value="claude-opus-4-8"           title="Opus 4.8 · claude-opus-4-8">Opus 4.8</option>
-                    <option value="opusplan"                  title="Opus Plan · opusplan — Opus while planning, Sonnet for execution">Opus Plan</option>
-                    <option value="claude-fable-5-1"          title="Fable 5.1 · claude-fable-5-1">Fable 5.1</option>
-                    <option value="claude-fable-5"            title="Fable 5 · claude-fable-5">Fable 5</option>
-                    <option value="claude-haiku-4-5" title="Haiku 4.5 · claude-haiku-4-5">Haiku 4.5</option>
-                </select>
-                <div class="model-control" id="model-control">
-                    <button type="button" class="effort-btn" id="model-btn" onclick="toggleModelPopup()" title="Model">
-                        <span id="model-btn-label">Sonnet 5</span>
-                        <span class="effort-btn-caret">▾</span>
-                    </button>
-                    <div class="permission-popup model-popup" id="model-popup" hidden></div>
-                </div>
-                <button class="new-chat" title="New chat">✎</button>
-            </div>
-        </div>
-
-        <div class="cwdbar cwdbar-empty" id="cwdbar" onclick="copyCwd()" title="">
-            <span class="cwdbar-icon">📁</span>
-            <span class="cwdbar-path" id="cwdbar-path">No workspace</span>
-            <span class="cwdbar-presence" id="cwdbar-presence" hidden></span>
-        </div>
-
         <div class="statusbar" id="statusbar" style="display:none" title="">
-            <span class="statusbar-icon">▸</span>
+            <span class="statusbar-icon">&#9656;</span>
             <span class="statusbar-text" id="statusbar-text"></span>
         </div>
 
@@ -566,6 +546,27 @@
                     <div class="right-buttons">
                         <span class="history-hint" id="history-hint" hidden></span>
                         <span class="token-estimate" id="token-estimate" title="Approximate input tokens"></span>
+                        <!-- Hidden native select stays as the single source of truth for the
+                             model id — send payload, caption, /model card and localStorage all
+                             read/write it. The visible control is the effort-style button. -->
+                        <select class="model-select" hidden>
+                            <option value="claude-sonnet-5"           title="Sonnet 5 · claude-sonnet-5">Sonnet 5</option>
+                            <option value="claude-sonnet-4-6"         title="Sonnet 4.6 · claude-sonnet-4-6">Sonnet 4.6</option>
+                            <option value="claude-opus-5-5"           title="Opus 5.5 · claude-opus-5-5">Opus 5.5</option>
+                            <option value="claude-opus-5"             title="Opus 5 · claude-opus-5">Opus 5</option>
+                            <option value="claude-opus-4-8"           title="Opus 4.8 · claude-opus-4-8">Opus 4.8</option>
+                            <option value="opusplan"                  title="Opus Plan · opusplan — Opus while planning, Sonnet for execution">Opus Plan</option>
+                            <option value="claude-fable-5-1"          title="Fable 5.1 · claude-fable-5-1">Fable 5.1</option>
+                            <option value="claude-fable-5"            title="Fable 5 · claude-fable-5">Fable 5</option>
+                            <option value="claude-haiku-4-5" title="Haiku 4.5 · claude-haiku-4-5">Haiku 4.5</option>
+                        </select>
+                        <div class="model-control" id="model-control">
+                            <button type="button" class="effort-btn" id="model-btn" onclick="toggleModelPopup()" title="Model">
+                                <span id="model-btn-label">Sonnet 5</span>
+                                <span class="effort-btn-caret">▴</span>
+                            </button>
+                            <div class="permission-popup model-popup" id="model-popup" hidden></div>
+                        </div>
                         <div class="effort-control" id="effort-control">
                             <button type="button" class="effort-btn" id="effort-btn" onclick="toggleEffortPopup()" title="Reasoning effort">
                                 <span id="effort-btn-icon">🧭</span>

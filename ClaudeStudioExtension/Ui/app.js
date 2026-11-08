@@ -32,26 +32,7 @@ console.log("Claude Code Studio loaded");
     }
 })();
 
-// ── Layout toggle ────────────────────────────────────────────
-function toggleLayout() {
-    const app = document.querySelector(".app");
-    const btn = document.getElementById("btn-layout");
-    app.classList.toggle("compact");
-    const compact = app.classList.contains("compact");
-    btn.classList.toggle("active", compact);
-    localStorage.setItem("compactLayout", compact ? "1" : "0");
-}
-
-(function restoreCompactLayout() {
-    if (localStorage.getItem("compactLayout") === "1") {
-        const app = document.querySelector(".app");
-        const btn = document.getElementById("btn-layout");
-        app.classList.add("compact");
-        if (btn) btn.classList.add("active");
-    }
-})();
-
-// ── Composer splitter ────────────────────────────────────────
+// ── Composer splitter
 (function initSplitter() {
     const splitter = document.getElementById("splitter");
     if (!splitter) return;
@@ -243,6 +224,16 @@ document.addEventListener("click", e => {
     const wrap = document.getElementById("settings-wrap");
     if (wrap && !wrap.contains(e.target))
         document.getElementById("settings-menu")?.classList.remove("open");
+});
+
+function toggleInfoMenu() {
+    document.getElementById("info-menu").classList.toggle("open");
+}
+
+document.addEventListener("click", e => {
+    const wrap = document.getElementById("info-wrap");
+    if (wrap && !wrap.contains(e.target))
+        document.getElementById("info-menu")?.classList.remove("open");
 });
 
 // ── Prompt history (Ctrl+Up / Ctrl+Down) ─────────────────────

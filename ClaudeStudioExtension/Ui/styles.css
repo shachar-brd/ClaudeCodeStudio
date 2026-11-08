@@ -99,14 +99,6 @@ body {
     color: var(--accent);
 }
 
-#btn-layout.active {
-    color: #ddd;
-}
-
-
-/* Compact layout */
-.app.compact .titlebar { display: none; }
-
 .cmd-wrap {
     position: relative;
 }
@@ -132,7 +124,26 @@ body {
 #btn-diff,
 #history-wrap .action-btn,
 #cmd-wrap .cmd-trigger,
+#info-wrap .cmd-trigger,
 #settings-wrap .cmd-trigger { font-size: 20px; }
+
+.info-menu {
+    min-width: 260px;
+    max-width: 360px;
+    padding: 6px 0;
+}
+.info-menu .info-row {
+    padding: 4px 14px;
+}
+.info-menu .account-info {
+    display: block;
+    margin-right: 0;
+}
+.info-menu .cwdbar {
+    height: auto;
+    padding: 4px 14px;
+    border-bottom: none;
+}
 
 #btn-permission { font-size: 16px; }
 
@@ -1544,27 +1555,6 @@ html.light-theme .mcp-trust-select-all { color: #666; }
     border-color: var(--accent);
 }
 
-.new-chat {
-    background: none;
-    border: none;
-    color: #aaa;
-    font-size: 16px;
-    cursor: pointer;
-    padding: 0;
-    width: 34px;
-    height: 34px;
-    border-radius: 6px;
-    line-height: 1;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-}
-
-.new-chat:hover {
-    background: #333;
-    color: #fff;
-}
-
 .content {
     flex: 1;
     min-height: 0;
@@ -1740,7 +1730,7 @@ body.splitter-dragging * {
 }
 
 .composer {
-    padding: 10px 12px 14px;
+    padding: 4px 8px 6px;
     border-top: 1px solid #333;
     background: #202020;
 }
@@ -1803,9 +1793,9 @@ body.splitter-dragging * {
     position: relative;
     background: #2a2a2a;
     border: 1px solid #3a3a3a;
-    border-radius: 14px;
-    padding: 12px;
-    transition: border-color 0.18s ease, box-shadow 0.18s ease, background 0.18s ease;
+    border-radius: 10px;
+    padding: 6px 10px;
+    transition: border-color
 }
 
 .cmd-autocomplete {
@@ -1883,7 +1873,7 @@ textarea {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    margin-top: 8px;
+    margin-top: 2px;
 }
 
 .left-buttons {
@@ -1896,9 +1886,9 @@ textarea {
     background: none;
     border: none;
     color: #aaa;
-    font-size: 18px;
+    font-size: 16px;
     cursor: pointer;
-    padding: 2px 6px;
+    padding: 1px 6px;
     border-radius: 4px;
     line-height: 1;
 }
@@ -1961,7 +1951,7 @@ html.light-theme .token-estimate { color: #999; }
     border-radius: 6px;
     cursor: pointer;
     outline: none;
-    height: 34px;
+    height: 26px;
     display: inline-flex;
     align-items: center;
     gap: 4px;
@@ -2039,14 +2029,6 @@ html.light-theme .effort-btn-caret { color: #888; }
 /* `display: flex` above overrides the [hidden] attribute's default
    `display: none` — restore it explicitly. */
 .permission-popup[hidden] { display: none; }
-/* The model button lives in the titlebar (top of the window), so its popup
-   opens downward — unlike the composer popups, which open upward. The compound
-   selector outweighs `.permission-popup`, so `bottom` can't leak back in and
-   pin both edges (which collapsed the popup box to zero height). */
-.permission-popup.model-popup {
-    bottom: auto;
-    top: calc(100% + 6px);
-}
 .permission-item {
     background: transparent;
     border: 1px solid transparent;

@@ -498,7 +498,7 @@ sealed class ClaudeSession : IAsyncDisposable
     // (validation round 2026-07-16). Permission rules stay OUT of the key: the
     // pipe re-reads them on every request, no respawn needed.
     private static string SpawnSettingsFingerprint(ClaudeSettings? s) =>
-        s == null ? "True||True|False" : $"{s.CoAuthoredBy}|{s.CleanupPeriodDays}|{s.AutoCompact}|{s.PersistentShell}";
+        s == null ? "True||True|True" : $"{s.CoAuthoredBy}|{s.CleanupPeriodDays}|{s.AutoCompact}|{s.PersistentShell}";
 
     // ask and plan share a spawn profile (hooks + prompt tool + settings) and
     // flip between each other live via set_permission_mode — so the key must

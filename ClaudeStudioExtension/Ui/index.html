@@ -305,10 +305,10 @@
                         <div class="settings-row">
                             <span class="settings-label">
                                 Persistent shell
-                                <span class="info-icon" title="Run shell commands in one long-lived Git Bash instead of starting a new shell for every command (much faster in a sandbox). Replaces the built-in Bash and PowerShell tools in ask, plan and yolo mode. Applies to new/restarted sessions.">ⓘ</span>
+                                <span class="info-icon" title="Run shell commands in one long-lived Git Bash instead of starting a new shell for every command (much faster in a sandbox). Replaces the built-in Bash and PowerShell tools in ask, plan and yolo mode; falls back to them when the shell could not run in claude's sandbox. Commands and output appear in the Output window (Claude Code Studio: Shell). Applies to new/restarted sessions.">ⓘ</span>
                             </span>
                             <label class="toggle">
-                                <input type="checkbox" id="persistentshell-toggle" onchange="setPersistentShell(this.checked)" />
+                                <input type="checkbox" id="persistentshell-toggle" checked onchange="setPersistentShell(this.checked)" />
                                 <span class="toggle-track"></span>
                             </label>
                         </div>

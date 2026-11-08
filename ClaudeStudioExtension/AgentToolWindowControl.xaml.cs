@@ -1849,7 +1849,7 @@ public partial class AgentToolWindowControl : UserControl
                 CoAuthoredBy = request.CoAuthoredBy ?? true,
                 CleanupPeriodDays = request.CleanupPeriodDays,
                 AutoCompact = request.AutoCompact ?? true,
-                PersistentShell = request.PersistentShell ?? false,
+                PersistentShell = request.PersistentShell ?? true,
                 PermissionAllow = request.PermissionAllow,
                 PermissionAsk = request.PermissionAsk,
                 PermissionDeny = request.PermissionDeny,

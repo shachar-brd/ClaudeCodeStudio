@@ -92,9 +92,11 @@ public class ClaudeSettings
 
     // true → shell commands run in the agent's persistent Git Bash (the bash tool
     // of the claudestudio-vs MCP server) and the built-in Bash/PowerShell tools are
-    // disabled, so a command no longer starts a shell process of its own. Off by
-    // default; read at spawn, so changing it respawns the session.
-    public bool PersistentShell { get; set; }
+    // disabled, so a command no longer starts a shell process of its own. On by
+    // default (the agent falls back to the built-in Bash when Git Bash is missing
+    // or the shell could not run in claude's Sandboxie box); read at spawn, so
+    // changing it respawns the session.
+    public bool PersistentShell { get; set; } = true;
 
     // V6 permission rules — claude-style rule strings ("Bash(git *)", "Read").
     // Written to the generated settings.json (permissions{allow,ask,deny}) for

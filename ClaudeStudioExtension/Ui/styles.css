@@ -2072,13 +2072,15 @@ html.light-theme .permission-item.active {
 }
 
 .send {
-    width: 34px;
-    height: 34px;
+    width: 26px;
+    height: 26px;
+    padding: 0;
+    line-height: 1;
     border-radius: 8px;
     border: none;
     background: var(--accent);
     color: white;
-    font-size: 18px;
+    font-size: 15px;
     cursor: pointer;
     transition: background 0.15s;
 }

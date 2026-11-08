@@ -1827,7 +1827,7 @@ const btnSend = document.getElementById("btn-send");
 
 function setStreaming(on) {
     isStreaming = on;
-    btnSend.textContent = on ? "■" : "↑";
+    btnSend.textContent = on ? "■" : "\u27A2";
     btnSend.classList.toggle("stop", on);
 }
 

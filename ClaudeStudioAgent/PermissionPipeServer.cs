@@ -326,14 +326,11 @@ internal sealed class PermissionPipeServer : IAsyncDisposable
                 Text = what
             });
 
+            // The VS bridge tools (vs_build, vs_test) go through the normal flow on
+            // purpose: they run project build targets and test code inside Visual
+            // Studio, outside any sandbox claude itself runs in.
             Decision decision;
-            if (toolName!.StartsWith("mcp__" + McpMode.ServerName + "__", StringComparison.Ordinal))
-            {
-                // Our own VS bridge: read/build only, no prompt needed.
-                decision = new Decision(true, null);
-                LogAuto("allowed: Visual Studio bridge tool");
-            }
-            else if (IsPlanFileWrite(toolName!, toolInput))
+            if (IsPlanFileWrite(toolName!, toolInput))
             {
                 // Plan mode saves its plan document to ~/.claude/plans/<slug>.md
                 // through the Write tool — CLI bookkeeping, not a workspace edit.

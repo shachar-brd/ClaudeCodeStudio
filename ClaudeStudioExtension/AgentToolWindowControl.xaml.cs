@@ -4116,6 +4116,13 @@ public partial class AgentToolWindowControl : UserControl
 
         try
         {
+            // claude waits for this answer before its next step, so a file VS does
+            // not analyze is answered at once instead of after the wait below.
+            if (!await VsMayAnalyzeAsync(filePath))
+            {
+                await _agentClient.SendDiagnosticsResponseAsync(requestId, "");
+                return;
+            }
             // The edit just hit disk; the language service needs a beat to refresh
             // the Error List. Stay well under the agent's 8s hook timeout.
             await Task.Delay(900);
@@ -4126,6 +4133,37 @@ public partial class AgentToolWindowControl : UserControl
         {
             OutputLog.Warn($"diagnostics request handling failed: {ex.Message}");
             try { await _agentClient.SendDiagnosticsResponseAsync(requestId, ""); } catch { }
+        }
+    }
+
+    // Plain-text and data files no language service reports on.
+    private static readonly HashSet<string> NoDiagnosticsExtensions = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ".md", ".markdown", ".txt", ".log", ".csv", ".tsv", ".gitignore", ".gitattributes",
+        ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".ico", ".svg"
+    };
+
+    // False when VS will not produce Error List entries for the file: a plain-text
+    // extension, or (with a solution open) a file that is neither in the solution
+    // nor open in an editor. Folder view (no .sln) analyzes loose files, so it and
+    // any failure keep the old behaviour (wait and read).
+    private static async Task<bool> VsMayAnalyzeAsync(string filePath)
+    {
+        try
+        {
+            if (NoDiagnosticsExtensions.Contains(Path.GetExtension(filePath))) return false;
+            await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
+            var dte = Package.GetGlobalService(typeof(EnvDTE.DTE)) as EnvDTE.DTE;
+            if (dte?.Solution == null || string.IsNullOrEmpty(dte.Solution.FullName)) return true;
+            if (dte.Solution.FindProjectItem(filePath) != null) return true;
+            var full = Path.GetFullPath(filePath);
+            foreach (EnvDTE.Document doc in dte.Documents)
+                if (string.Equals(doc.FullName, full, StringComparison.OrdinalIgnoreCase)) return true;
+            return false;
+        }
+        catch
+        {
+            return true;
         }
     }
 

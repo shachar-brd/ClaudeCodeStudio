@@ -72,15 +72,18 @@ internal static class ErrorListReader
                 return "";
 
             // errors (EC_ERROR=0) before warnings (EC_WARNING=1)
-            var ordered = rows.OrderBy(r => r.order).Select(r => r.line).ToList();
-            var errorCount = rows.Count(r => r.order == (int)__VSERRORCATEGORY.EC_ERROR);
-            var warnCount = rows.Count - errorCount;
+            var errors = rows.Where(r => r.order == (int)__VSERRORCATEGORY.EC_ERROR).Select(r => r.line).ToList();
+            var warnings = rows.Where(r => r.order != (int)__VSERRORCATEGORY.EC_ERROR).Select(r => r.line).ToList();
 
+            // Capped: this goes into claude's context after every edit, and a file
+            // with many old warnings would otherwise add kilobytes each time.
             var sb = new StringBuilder();
             sb.AppendLine($"VS Error List for {Path.GetFileName(filePath)} after your edit " +
-                          $"({errorCount} error(s), {warnCount} warning(s)):");
-            foreach (var r in ordered)
-                sb.AppendLine(r);
+                          $"({errors.Count} error(s), {warnings.Count} warning(s)):");
+            foreach (var r in errors.Take(MaxFileErrors)) sb.AppendLine(r);
+            if (errors.Count > MaxFileErrors) sb.AppendLine($"  ... and {errors.Count - MaxFileErrors} more error(s)");
+            foreach (var r in warnings.Take(MaxFileWarnings)) sb.AppendLine(r);
+            if (warnings.Count > MaxFileWarnings) sb.AppendLine($"  ... and {warnings.Count - MaxFileWarnings} more warning(s)");
             sb.Append("Fix the errors above if they were caused by your edit.");
             return sb.ToString();
         }
@@ -90,6 +93,10 @@ internal static class ErrorListReader
             return "";
         }
     }
+
+    /// <summary>Caps for the per-file block sent to claude after each edit.</summary>
+    private const int MaxFileErrors = 30;
+    private const int MaxFileWarnings = 10;
 
     /// <summary>Caps for the build-error prompt, so a build with hundreds of issues doesn't flood the turn.</summary>
     private const int MaxPromptErrors = 40;

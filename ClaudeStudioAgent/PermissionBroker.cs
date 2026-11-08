@@ -230,7 +230,10 @@ internal sealed class PermissionBroker : IAsyncDisposable
     {
         var ct = _cts.Token;
         var toolUseId = call.ToolUseId;
-        var toolName = call.ToolName;
+        // The persistent-shell tool stands in for Bash (same input): Bash(...) rules,
+        // "allow Bash for the session", the prompt card and the shell-build redirect
+        // all apply to it unchanged.
+        var toolName = call.ToolName == VsBridgeMcpServer.ShellToolFullName ? "Bash" : call.ToolName;
         var toolInput = call.ToolInputJson;
         var cwd = call.Cwd;
 

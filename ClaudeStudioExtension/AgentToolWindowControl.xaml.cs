@@ -1849,6 +1849,7 @@ public partial class AgentToolWindowControl : UserControl
                 CoAuthoredBy = request.CoAuthoredBy ?? true,
                 CleanupPeriodDays = request.CleanupPeriodDays,
                 AutoCompact = request.AutoCompact ?? true,
+                PersistentShell = request.PersistentShell ?? false,
                 PermissionAllow = request.PermissionAllow,
                 PermissionAsk = request.PermissionAsk,
                 PermissionDeny = request.PermissionDeny,
@@ -4244,6 +4245,9 @@ public partial class AgentToolWindowControl : UserControl
 
         [JsonPropertyName("autoCompact")]
         public bool? AutoCompact { get; set; }
+
+        [JsonPropertyName("persistentShell")]
+        public bool? PersistentShell { get; set; }
 
         [JsonPropertyName("code")]
         public string? Code { get; set; }

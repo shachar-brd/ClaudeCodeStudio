@@ -54,24 +54,27 @@ public static class ControlHooks
     public const string PostToolUseMatcher = "Edit|Write|MultiEdit|NotebookEdit";
 
     // The `initialize` control_request body. preToolUseTimeoutSeconds must outlive
-    // the longest the permission modal can wait (see PermissionBroker).
-    public static JsonObject BuildInitializeRequest(int preToolUseTimeoutSeconds) => new()
+    // the longest the permission modal can wait (see PermissionBroker). Without
+    // hooks (yolo mode, which only needs the control channel for the MCP server)
+    // the request registers nothing.
+    public static JsonObject BuildInitializeRequest(int preToolUseTimeoutSeconds, bool includeHooks = true) =>
+        includeHooks
+            ? new JsonObject { ["subtype"] = "initialize", ["hooks"] = BuildHooks(preToolUseTimeoutSeconds) }
+            : new JsonObject { ["subtype"] = "initialize" };
+
+    private static JsonObject BuildHooks(int preToolUseTimeoutSeconds) => new()
     {
-        ["subtype"] = "initialize",
-        ["hooks"] = new JsonObject
+        ["PreToolUse"] = new JsonArray(new JsonObject
         {
-            ["PreToolUse"] = new JsonArray(new JsonObject
-            {
-                ["matcher"] = PreToolUseMatcher,
-                ["hookCallbackIds"] = new JsonArray(PreToolUseCallbackId),
-                ["timeout"] = preToolUseTimeoutSeconds
-            }),
-            ["PostToolUse"] = new JsonArray(new JsonObject
-            {
-                ["matcher"] = PostToolUseMatcher,
-                ["hookCallbackIds"] = new JsonArray(PostToolUseCallbackId)
-            })
-        }
+            ["matcher"] = PreToolUseMatcher,
+            ["hookCallbackIds"] = new JsonArray(PreToolUseCallbackId),
+            ["timeout"] = preToolUseTimeoutSeconds
+        }),
+        ["PostToolUse"] = new JsonArray(new JsonObject
+        {
+            ["matcher"] = PostToolUseMatcher,
+            ["hookCallbackIds"] = new JsonArray(PostToolUseCallbackId)
+        })
     };
 
     public sealed class HookCall

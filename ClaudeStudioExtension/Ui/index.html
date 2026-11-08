@@ -304,6 +304,16 @@
                         </div>
                         <div class="settings-row">
                             <span class="settings-label">
+                                Persistent shell
+                                <span class="info-icon" title="Run shell commands in one long-lived Git Bash instead of starting a new shell for every command (much faster in a sandbox). Replaces the built-in Bash and PowerShell tools in ask, plan and yolo mode. Applies to new/restarted sessions.">ⓘ</span>
+                            </span>
+                            <label class="toggle">
+                                <input type="checkbox" id="persistentshell-toggle" onchange="setPersistentShell(this.checked)" />
+                                <span class="toggle-track"></span>
+                            </label>
+                        </div>
+                        <div class="settings-row">
+                            <span class="settings-label">
                                 Transcript retention (days)
                                 <span class="info-icon" title="How many days claude keeps chat transcripts before automatic cleanup. Leave blank for the default (30). Applies to new/restarted sessions.">ⓘ</span>
                             </span>

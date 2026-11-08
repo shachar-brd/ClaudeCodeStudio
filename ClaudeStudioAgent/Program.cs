@@ -489,7 +489,7 @@ sealed class ClaudeSession : IAsyncDisposable
     // (validation round 2026-07-16). Permission rules stay OUT of the key: the
     // pipe re-reads them on every request, no respawn needed.
     private static string SpawnSettingsFingerprint(ClaudeSettings? s) =>
-        s == null ? "True||True" : $"{s.CoAuthoredBy}|{s.CleanupPeriodDays}|{s.AutoCompact}";
+        s == null ? "True||True|False" : $"{s.CoAuthoredBy}|{s.CleanupPeriodDays}|{s.AutoCompact}|{s.PersistentShell}";
 
     // ask and plan share a spawn profile (hooks + prompt tool + settings) and
     // flip between each other live via set_permission_mode — so the key must
@@ -546,6 +546,18 @@ The user's IDE selection (if any) is included in the conversation context and ma
         // Set by the ask/plan branch when the broker gates tools: the hooks are
         // registered right after spawn, and the session must not run without them.
         bool registerControlHooks = false;
+        bool mcpConfigAdded = false;
+
+        // Persistent shell (opt-in): the bash tool of the MCP server replaces the
+        // built-in Bash/PowerShell tools. Not in dontAsk, where the CLI's own
+        // read-only gate on Bash is the point of the mode.
+        string? shellBash = null;
+        if (_claudeSettings?.PersistentShell == true && _broker != null && _permissionMode != "dontAsk")
+        {
+            shellBash = PersistentShellPool.FindGitBash();
+            if (shellBash == null)
+                EmitWarn("persistent shell is on but Git Bash (usr\\bin\\bash.exe) was not found; using the built-in Bash tool");
+        }
 
         var psi = new ProcessStartInfo
         {
@@ -602,7 +614,7 @@ The user's IDE selection (if any) is included in the conversation context and ma
         // setting (app.js), not a spawn-time choice.
         psi.ArgumentList.Add("--forward-subagent-text");
         psi.ArgumentList.Add("--append-system-prompt");
-        psi.ArgumentList.Add(VsContextPrompt);
+        psi.ArgumentList.Add(shellBash != null ? VsContextPrompt + VsBridgeMcpServer.ShellSystemPrompt : VsContextPrompt);
         psi.ArgumentList.Add("--model");
         psi.ArgumentList.Add(_model);
 
@@ -667,6 +679,7 @@ The user's IDE selection (if any) is included in the conversation context and ma
                 // mcp_message control_requests, nothing is spawned.
                 psi.ArgumentList.Add("--mcp-config");
                 psi.ArgumentList.Add(VsBridgeMcpServer.McpConfigJson);
+                mcpConfigAdded = true;
                 // Claude has an internal permission check for file-modifying tools
                 // (Edit/Write/MultiEdit) that runs BEFORE PreToolUse hooks in stdio
                 // mode. Without acceptEdits, claude blocks these tools with
@@ -705,6 +718,20 @@ The user's IDE selection (if any) is included in the conversation context and ma
             }
             // ask without the broker: no mode arg (claude's default; auto-approves
             // in stdio) — SwitchPermissionModeAsync uses "default" to come back.
+        }
+
+        if (shellBash != null)
+        {
+            // The built-in shell tools start a Git Bash (or PowerShell) per call;
+            // with them gone the model uses the persistent shell's bash tool.
+            psi.ArgumentList.Add("--disallowedTools");
+            psi.ArgumentList.Add("Bash,PowerShell");
+            if (!mcpConfigAdded)
+            {
+                // yolo: the MCP server is otherwise only declared in ask/plan.
+                psi.ArgumentList.Add("--mcp-config");
+                psi.ArgumentList.Add(VsBridgeMcpServer.McpConfigJson);
+            }
         }
 
         // User-configured claude settings, all modes. No-op if nothing set.
@@ -886,20 +913,38 @@ The user's IDE selection (if any) is included in the conversation context and ma
         // Instead, init arrives as the first event of the first SendMessageAsync call
         // and is processed by the same loop as everything else. The initialize
         // control_request below is such a stdin line; claude answers it at once.
-        if (registerControlHooks)
-            await InitializeControlChannelAsync(sw);
+        if (shellBash != null)
+        {
+            // Warmed now: the login shell takes seconds in the box, and the first
+            // command should not wait for it.
+            _shellPool = new PersistentShellPool(shellBash, _workingDirectory, ShellPoolSize);
+            _shellPool.Warm();
+            EmitTiming($"persistent shell: {shellBash}", sw.ElapsedMilliseconds);
+        }
+        if (registerControlHooks || shellBash != null)
+            await InitializeControlChannelAsync(sw, registerControlHooks);
     }
+
+    // Parallel tool calls each get a shell up to this many; more wait for one.
+    private const int ShellPoolSize = 3;
+    private PersistentShellPool? _shellPool;
 
     // Registers the PreToolUse/PostToolUse hook callbacks. Fail-closed: in ask/plan
     // mode claude runs under bypassPermissions, so without the PreToolUse hook every
-    // tool would run unprompted — the session is torn down instead.
-    private async Task InitializeControlChannelAsync(Stopwatch sw)
+    // tool would run unprompted — the session is torn down instead. Without hooks
+    // (yolo + persistent shell) there is nothing to protect, so a failure only warns.
+    private async Task InitializeControlChannelAsync(Stopwatch sw, bool includeHooks)
     {
         var resp = await SendControlRequestAsync(
-            ControlHooks.BuildInitializeRequest(PermissionBroker.HookTimeoutSeconds), "initialize", quietErrors: true);
+            ControlHooks.BuildInitializeRequest(PermissionBroker.HookTimeoutSeconds, includeHooks), "initialize", quietErrors: true);
         if (resp != null)
         {
             EmitTiming("control channel initialized", sw.ElapsedMilliseconds);
+            return;
+        }
+        if (!includeHooks)
+        {
+            EmitWarn("claude did not accept the initialize control_request; the persistent shell may not be available");
             return;
         }
 
@@ -959,6 +1004,10 @@ The user's IDE selection (if any) is included in the conversation context and ma
         return true;
     }
 
+    // CLAUDESTUDIO_TRACE_CONTROL=1: a timing line per hook callback / MCP message,
+    // for breaking down where a tool call's time goes (scripts/shell-perf).
+    private static readonly bool TraceControl = Environment.GetEnvironmentVariable("CLAUDESTUDIO_TRACE_CONTROL") == "1";
+
     // Hook callbacks and MCP messages claude sends on the control channel. Every
     // stdout reader calls this first: claude blocks on each answer, and some
     // arrive outside a turn (the MCP initialize comes before the answer to our
@@ -970,6 +1019,14 @@ The user's IDE selection (if any) is included in the conversation context and ma
         var requestId = evt.TryGetProperty("request_id", out var rid) ? rid.GetString() : null;
         if (requestId == null || !evt.TryGetProperty("request", out var req)) return false;
         var subtype = req.TryGetProperty("subtype", out var st) ? st.GetString() : null;
+        if (TraceControl && subtype is "hook_callback" or "mcp_message")
+            Console.WriteLine(JsonSerializer.Serialize(new ChatChunk
+            {
+                Type = "timing",
+                Text = $"control {subtype} " + (subtype == "hook_callback"
+                    ? (req.TryGetProperty("callback_id", out var cb) ? cb.GetString() : "")
+                    : (req.TryGetProperty("message", out var mm) && mm.TryGetProperty("method", out var me) ? me.GetString() : ""))
+            }));
 
         Func<Task<JsonObject>> answer;
         var isPreToolUse = false;
@@ -1037,8 +1094,19 @@ The user's IDE selection (if any) is included in the conversation context and ma
             };
         else
             reply = await VsBridgeMcpServer.HandleAsync(message, _workingDirectory,
-                spec => _broker.RunBridgeAsync("mcp-" + Guid.NewGuid().ToString("N"), spec));
+                spec => _broker.RunBridgeAsync("mcp-" + Guid.NewGuid().ToString("N"), spec),
+                _shellPool == null ? null : RunShellAsync);
         return new JsonObject { ["mcp_response"] = reply };
+    }
+
+    private async Task<ShellRunResult> RunShellAsync(string command, int timeoutMs)
+    {
+        var pool = _shellPool ?? throw new InvalidOperationException("the persistent shell is not running");
+        var sw = Stopwatch.StartNew();
+        var r = await pool.RunAsync(command, TimeSpan.FromMilliseconds(timeoutMs));
+        // Output log only: what the shell itself cost, apart from claude and the hooks.
+        EmitTiming("persistent shell command", sw.ElapsedMilliseconds);
+        return new ShellRunResult { Output = r.Output, ExitCode = r.ExitCode, TimedOut = r.TimedOut, ShellEnded = r.ShellEnded };
     }
 
     // Auto-allow an unexpected control_request, echoing the input unchanged.
@@ -1561,6 +1629,12 @@ The user's IDE selection (if any) is included in the conversation context and ma
             _stdin = null;
             _stdout = null;
             _proc = null;
+
+            if (_shellPool != null)
+            {
+                try { await _shellPool.DisposeAsync(); } catch { }
+                _shellPool = null;
+            }
 
             if (_settingsTempDir != null)
             {

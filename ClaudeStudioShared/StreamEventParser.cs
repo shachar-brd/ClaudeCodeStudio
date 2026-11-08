@@ -201,7 +201,7 @@ public static class StreamEventParser
 
                 if (itemTypeStr == "tool_use")
                 {
-                    var name = item.TryGetProperty("name", out var nameProp) ? nameProp.GetString() ?? "" : "";
+                    var name = DisplayToolName(item.TryGetProperty("name", out var nameProp) ? nameProp.GetString() ?? "" : "");
                     var id = item.TryGetProperty("id", out var idProp) ? idProp.GetString() : null;
                     string? inputJson = item.TryGetProperty("input", out var inputProp) ? inputProp.GetRawText() : null;
 
@@ -402,6 +402,11 @@ public static class StreamEventParser
         }
     }
 
+    // The persistent-shell tool takes the same input as Bash and stands in for it,
+    // so the chat shows it as a Bash call.
+    public static string DisplayToolName(string name) =>
+        name == VsBridgeMcpServer.ShellToolFullName ? "Bash" : name;
+
     private static void ProcessControlRequest(JsonElement evt, string? workingDirectory, StreamEventResult result)
     {
         // Bidirectional control channel (--permission-prompt-tool stdio).
@@ -574,7 +579,7 @@ public static class StreamEventParser
             }
             else if (itemTypeStr == "tool_use")
             {
-                var name = item.TryGetProperty("name", out var nameProp) ? nameProp.GetString() ?? "" : "";
+                var name = DisplayToolName(item.TryGetProperty("name", out var nameProp) ? nameProp.GetString() ?? "" : "");
                 var id = item.TryGetProperty("id", out var idProp) ? idProp.GetString() : null;
                 string? inputJson = item.TryGetProperty("input", out var inputProp) ? inputProp.GetRawText() : null;
                 chunks.Add(new ChatChunk

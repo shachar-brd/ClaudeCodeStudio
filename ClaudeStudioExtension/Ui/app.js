@@ -2343,6 +2343,7 @@ function sendMessage() {
             // V7 claude settings (default ON; only deviations affect the spawn).
             coAuthoredBy: localStorage.getItem("coAuthoredBy") !== "false",
             autoCompact: localStorage.getItem("autoCompact") !== "false",
+            persistentShell: localStorage.getItem("persistentShell") === "true",
             cleanupPeriodDays: (() => { const v = parseInt(localStorage.getItem("cleanupPeriodDays") || "", 10); return Number.isNaN(v) || v < 1 ? null : v; })(),
             // V6 permission rules — evaluated per-turn by the agent's pipe and
             // written to the generated settings.json for new sessions.
@@ -3390,6 +3391,12 @@ const autoCompactToggle = document.getElementById("autocompact-toggle");
 if (autoCompactToggle) autoCompactToggle.checked = localStorage.getItem("autoCompact") !== "false";
 function setAutoCompact(checked) { localStorage.setItem("autoCompact", checked); }
 
+// Persistent shell (default OFF): one Git Bash for the whole session instead of
+// a new shell per command; the agent respawns the session when it changes.
+const persistentShellToggle = document.getElementById("persistentshell-toggle");
+if (persistentShellToggle) persistentShellToggle.checked = localStorage.getItem("persistentShell") === "true";
+function setPersistentShell(checked) { localStorage.setItem("persistentShell", checked); }
+
 const cleanupDaysInput = document.getElementById("cleanup-days-input");
 if (cleanupDaysInput) cleanupDaysInput.value = localStorage.getItem("cleanupPeriodDays") || "";
 function setCleanupDays(value) {
@@ -3680,7 +3687,7 @@ const SETTINGS_KEYS = [
     "showTokens", "showTokenEstimate", "timingMode", "timeUnit", "compactLayout",
     "composerFontSize", "composerTextareaHeight",
     // Claude Code
-    "coAuthoredBy", "autoCompact", "cleanupPeriodDays", "permissionRules", "claudeCliPath", "fallbackModel", "subagentDetail",
+    "coAuthoredBy", "autoCompact", "persistentShell", "cleanupPeriodDays", "permissionRules", "claudeCliPath", "fallbackModel", "subagentDetail",
     // Workspace
     "workingDirOverrides", "workingDirectory", "showCwdbar", "statusLineCommand",
     "displayName", "accountInfoSource",

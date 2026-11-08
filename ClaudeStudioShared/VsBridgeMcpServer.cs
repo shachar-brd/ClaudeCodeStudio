@@ -8,9 +8,34 @@ namespace ClaudeStudioShared;
 // MCP JSON-RPC messages over its stdio control channel as
 // control_request{subtype:"mcp_message"}; the agent hands each message here and
 // returns the reply as the control_response's mcp_response.
+// One command's result from the agent's persistent shell (the bash tool).
+public sealed class ShellRunResult
+{
+    public string Output { get; set; } = "";
+    public int ExitCode { get; set; }
+    public bool TimedOut { get; set; }
+    // The shell ended (the command ran exit/exec, or it was killed on timeout);
+    // the next command starts a fresh one, so cd/exports are lost.
+    public bool ShellEnded { get; set; }
+}
+
 public static class VsBridgeMcpServer
 {
     public const string ServerName = "claudestudio-vs";
+
+    // The persistent-shell tool, offered when the session runs with the built-in
+    // Bash/PowerShell tools disabled (ClaudeSettings.PersistentShell).
+    public const string ShellToolName = "bash";
+    public const string ShellToolFullName = "mcp__" + ServerName + "__" + ShellToolName;
+
+    public const int DefaultShellTimeoutMs = 120000;
+    public const int MaxShellTimeoutMs = 600000;
+
+    // Appended to the session's system prompt when the shell tool replaces Bash.
+    public const string ShellSystemPrompt =
+        "\n\n## Shell\nRun shell commands with the " + ShellToolFullName + " tool: a persistent Git Bash in the working " +
+        "directory (cd and exported variables persist between calls). The built-in Bash and PowerShell tools are disabled " +
+        "in this session.";
 
     // Passed to claude with --mcp-config: an in-process server, no command to spawn.
     public static string McpConfigJson =>
@@ -76,13 +101,44 @@ public static class VsBridgeMcpServer
         }
     };
 
+    private static readonly JsonObject ShellSchema = new()
+    {
+        ["type"] = "object",
+        ["properties"] = new JsonObject
+        {
+            ["command"] = new JsonObject { ["type"] = "string", ["description"] = "The bash command to run." },
+            ["timeout"] = new JsonObject
+            {
+                ["type"] = "number",
+                ["description"] = $"Optional timeout in milliseconds (default {DefaultShellTimeoutMs}, max {MaxShellTimeoutMs})."
+            },
+            ["description"] = new JsonObject
+            {
+                ["type"] = "string",
+                ["description"] = "Clear, concise description of what this command does, in 5-10 words."
+            }
+        },
+        ["required"] = new JsonArray("command")
+    };
+
+    private const string ShellDescription =
+        "Run a command in a persistent Git Bash shell, started in the session's working directory. Use it for every " +
+        "shell command: the built-in Bash and PowerShell tools are disabled. cd and exported variables persist between " +
+        "calls. stdin is /dev/null and stderr is merged into stdout, so nothing interactive works (no editors, pagers, " +
+        "prompts); a non-zero exit code is reported as an error. Windows paths work as C:/dir or /c/dir. For a long-running " +
+        "process (a server, a watcher), start it in the background with its output redirected to a file " +
+        "(nohup cmd > out.log 2>&1 &) and read the file. Prefer the Read, Grep and Glob tools for reading and searching files.";
+
     // Handles one MCP JSON-RPC message. runBridge runs an encoded VsBridge spec in
     // Visual Studio and returns its summary ("" = VS gave no result).
     // workingDirectory is the session's, the base for relative project paths.
+    // runShell runs a command in the persistent shell (command, timeout ms); null
+    // = the bash tool is not offered.
     // Notifications (no id) get an empty result: the control channel still
     // expects an answer for every mcp_message.
     public static async Task<JsonObject> HandleAsync(
-        JsonObject message, string? workingDirectory, Func<string, Task<string>> runBridge)
+        JsonObject message, string? workingDirectory, Func<string, Task<string>> runBridge,
+        Func<string, int, Task<ShellRunResult>>? runShell = null)
     {
         var method = message["method"] is JsonValue m && m.TryGetValue<string>(out var s) ? s : null;
         var id = message["id"]?.DeepClone();
@@ -99,15 +155,18 @@ public static class VsBridgeMcpServer
                     ["protocolVersion"] = message["params"]?["protocolVersion"] is JsonValue pv &&
                                           pv.TryGetValue<string>(out var v) ? v : "2024-11-05",
                     ["capabilities"] = new JsonObject { ["tools"] = new JsonObject() },
-                    ["serverInfo"] = new JsonObject { ["name"] = ServerName, ["version"] = "1.2.0" },
-                    ["instructions"] = Instructions
+                    ["serverInfo"] = new JsonObject { ["name"] = ServerName, ["version"] = "1.3.0" },
+                    ["instructions"] = runShell == null
+                        ? Instructions
+                        : Instructions + " Run every shell command with the bash tool of this server: the built-in Bash and " +
+                                         "PowerShell tools are disabled in this session."
                 };
                 break;
             case "ping":
                 result = new JsonObject();
                 break;
             case "tools/list":
-                result = new JsonObject
+                var tools = new JsonObject
                 {
                     ["tools"] = new JsonArray(
                         new JsonObject
@@ -125,9 +184,22 @@ public static class VsBridgeMcpServer
                             ["inputSchema"] = TestSchema.DeepClone()
                         })
                 };
+                if (runShell != null)
+                {
+                    tools["tools"]!.AsArray().Add(new JsonObject
+                    {
+                        ["name"] = ShellToolName,
+                        ["description"] = ShellDescription,
+                        ["inputSchema"] = ShellSchema.DeepClone()
+                    });
+                }
+                result = tools;
                 break;
             case "tools/call":
-                result = await CallToolAsync(message["params"] as JsonObject, workingDirectory, runBridge);
+                var p = message["params"] as JsonObject;
+                result = runShell != null && p?["name"] is JsonValue tn && tn.TryGetValue<string>(out var toolName) && toolName == ShellToolName
+                    ? await CallShellAsync(p["arguments"] as JsonObject, runShell)
+                    : await CallToolAsync(p, workingDirectory, runBridge);
                 break;
             default:
                 error = new JsonObject { ["code"] = -32601, ["message"] = $"Method not found: {method}" };
@@ -205,6 +277,40 @@ public static class VsBridgeMcpServer
         if (string.IsNullOrWhiteSpace(text))
             text = "Visual Studio did not return a result. Is a solution open in the IDE with the Claude Code Studio window running?";
         return ToolResult(text, !IsSuccess(text, test));
+    }
+
+    private static async Task<JsonNode> CallShellAsync(JsonObject? args, Func<string, int, Task<ShellRunResult>> runShell)
+    {
+        var command = args?["command"] is JsonValue c && c.TryGetValue<string>(out var s) ? s : "";
+        if (string.IsNullOrWhiteSpace(command))
+            return ToolResult("command is required.", true);
+
+        var timeout = DefaultShellTimeoutMs;
+        if (args?["timeout"] is JsonValue t)
+        {
+            if (t.TryGetValue<double>(out var d) && d > 0) timeout = (int)Math.Min(d, MaxShellTimeoutMs);
+            else if (t.TryGetValue<string>(out var ts) && double.TryParse(ts, out var dp) && dp > 0)
+                timeout = (int)Math.Min(dp, MaxShellTimeoutMs);
+        }
+
+        ShellRunResult r;
+        try { r = await runShell(command, timeout); }
+        catch (Exception ex) { return ToolResult($"The shell could not run the command: {ex.Message}", true); }
+        return ToolResult(FormatShellResult(r, timeout), r.TimedOut || r.ExitCode != 0);
+    }
+
+    public static string FormatShellResult(ShellRunResult r, int timeoutMs)
+    {
+        var text = r.Output;
+        if (r.TimedOut)
+            text += (text.Length > 0 ? "\n" : "") +
+                    $"Command timed out after {timeoutMs / 1000.0:0.#}s and was killed. The shell was restarted (cd and exports were reset).";
+        else if (r.ExitCode != 0)
+            text += (text.Length > 0 ? "\n" : "") + $"Exit code {r.ExitCode}" +
+                    (r.ShellEnded ? " (the command ended the shell; the next command starts a fresh one in the working directory)" : "");
+        else if (r.ShellEnded)
+            text += (text.Length > 0 ? "\n" : "") + "(the command ended the shell; the next command starts a fresh one in the working directory)";
+        return text.Length == 0 ? "(no output)" : text;
     }
 
     // The extension's success summaries start with these; anything else (errors,

@@ -25,6 +25,7 @@
     <!-- Pure BCL sources from the net472 extension, linked so they can be tested on net10. -->
     <Compile Include="..\ClaudeStudioExtension\GatewayLogin.cs" Link="Linked\GatewayLogin.cs" />
     <Compile Include="..\ClaudeStudioExtension\ClaudePaths.cs" Link="Linked\ClaudePaths.cs" />
+    <Compile Include="..\ClaudeStudioAgent\PersistentShell.cs" Link="Linked\PersistentShell.cs" />
   </ItemGroup>
 
 </Project>

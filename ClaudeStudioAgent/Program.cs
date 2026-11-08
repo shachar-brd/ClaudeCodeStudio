@@ -1420,15 +1420,16 @@ The user's IDE selection (if any) is included in the conversation context and ma
     }
 
     // Declares the Visual Studio bridge MCP server (this same exe in --mcp mode).
+    // Written next to settings.json so DisposeAsync removes both; call after
+    // WriteSettings.
     private string? WriteMcpConfig()
     {
+        DeleteLegacyMcpConfigs();
         try
         {
             var exe = Environment.ProcessPath;
-            if (string.IsNullOrEmpty(exe)) return null;
-            var dir = Path.Combine(Path.GetTempPath(), "ClaudeStudio");
-            Directory.CreateDirectory(dir);
-            var path = Path.Combine(dir, $"mcp-{Environment.ProcessId}.json");
+            if (string.IsNullOrEmpty(exe) || _settingsTempDir == null) return null;
+            var path = Path.Combine(_settingsTempDir, "mcp.json");
             var cfg = new Dictionary<string, object>
             {
                 ["mcpServers"] = new Dictionary<string, object>
@@ -1440,6 +1441,26 @@ The user's IDE selection (if any) is included in the conversation context and ma
             return path;
         }
         catch { return null; }
+    }
+
+    private static bool _legacyMcpConfigsDeleted;
+
+    // Up to 1.1.16 the config went to %TEMP%\ClaudeStudio\mcp-<pid>.json and was
+    // never removed. claude reads it only at spawn, so deleting stale ones is safe.
+    private static void DeleteLegacyMcpConfigs()
+    {
+        if (_legacyMcpConfigsDeleted) return;
+        _legacyMcpConfigsDeleted = true;
+        try
+        {
+            var dir = Path.Combine(Path.GetTempPath(), "ClaudeStudio");
+            if (!Directory.Exists(dir)) return;
+            foreach (var f in Directory.EnumerateFiles(dir, "mcp-*.json"))
+            {
+                try { File.Delete(f); } catch { }
+            }
+        }
+        catch { }
     }
 
     // User-configurable claude.exe settings surfaced via the extension UI (V7).

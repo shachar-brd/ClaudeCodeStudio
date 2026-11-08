@@ -7,6 +7,15 @@ using System.Threading.Channels;
 using ClaudeStudioAgent;
 using ClaudeStudioShared;
 
+// Diagnostic: the Sandboxie box a process runs in (default: this one).
+if (args.Length >= 1 && args[0] == "--sandbox-box")
+{
+    var pid = args.Length >= 2 && int.TryParse(args[1], out var p) ? p : Environment.ProcessId;
+    var box = SandboxieBox.BoxOf(pid);
+    Console.WriteLine(box == null ? "unknown" : box == "" ? "(not in a box)" : box);
+    return 0;
+}
+
 // Phase 2 (gated): when enabled, ask/plan sessions register PreToolUse and
 // PostToolUse hooks and the VS bridge MCP server on claude's stdio control
 // channel, and this broker answers them (permission modal, diagnostics,
@@ -552,7 +561,7 @@ The user's IDE selection (if any) is included in the conversation context and ma
         // built-in Bash/PowerShell tools. Not in dontAsk, where the CLI's own
         // read-only gate on Bash is the point of the mode.
         string? shellBash = null;
-        if (_claudeSettings?.PersistentShell == true && _broker != null && _permissionMode != "dontAsk")
+        if (_claudeSettings?.PersistentShell == true && _broker != null && _permissionMode != "dontAsk" && !_shellRefused)
         {
             shellBash = PersistentShellPool.FindGitBash();
             if (shellBash == null)
@@ -788,7 +797,7 @@ The user's IDE selection (if any) is included in the conversation context and ma
         }
         else
         {
-            pregeneratedSessionId = Guid.NewGuid().ToString();
+            pregeneratedSessionId = _retrySessionId ?? Guid.NewGuid().ToString();
             psi.ArgumentList.Add("--session-id");
             psi.ArgumentList.Add(pregeneratedSessionId);
         }
@@ -915,15 +924,64 @@ The user's IDE selection (if any) is included in the conversation context and ma
         // control_request below is such a stdin line; claude answers it at once.
         if (shellBash != null)
         {
+            // Sandbox check, before any shell exists: the shell must not run less
+            // contained than claude. Started from here it lands in the agent's box
+            // (if any), so a boxed claude needs the agent in that same box. A
+            // refusal restarts claude with the built-in Bash tool (it was started
+            // with Bash disallowed) under the same session id.
+            var claudeBox = SandboxieBox.BoxOf(_proc!.Id);
+            // Test hook for the refusal path: can only make an unboxed claude look
+            // boxed (never the reverse), so it cannot bypass the check.
+            if (claudeBox == "" && Environment.GetEnvironmentVariable("CLAUDESTUDIO_TEST_PRETEND_CLAUDE_BOX") is { Length: > 0 } pretend)
+                claudeBox = pretend;
+            var agentBox = SandboxieBox.BoxOf(Environment.ProcessId);
+            EmitTiming($"sandbox: claude in {SandboxieBox.Describe(claudeBox)}, agent in {SandboxieBox.Describe(agentBox)}", sw.ElapsedMilliseconds);
+            var refusal = ShellSandboxRefusal(claudeBox, agentBox);
+            if (refusal != null)
+            {
+                Console.WriteLine(JsonSerializer.Serialize(new ChatChunk
+                {
+                    Type = "system-info",
+                    Text = $"Persistent shell is off for this session: {refusal} Using the built-in Bash tool. " +
+                           "To use the persistent shell in a sandbox, force ClaudeStudioAgent.exe into the same box as claude.exe."
+                }));
+                Console.Out.Flush();
+                _shellRefused = true;
+                _retrySessionId = pregeneratedSessionId;
+                await DisposeAsync();
+                await StartAsync();
+                return;
+            }
+
             // Warmed now: the login shell takes seconds in the box, and the first
-            // command should not wait for it.
-            _shellPool = new PersistentShellPool(shellBash, _workingDirectory, ShellPoolSize);
+            // command should not wait for it. Every shell started later (after an
+            // exit or a timeout) is checked against claude's box again.
+            _shellPool = new PersistentShellPool(shellBash, _workingDirectory, ShellPoolSize,
+                pid => claudeBox == "" || SandboxieBox.BoxOf(pid) == claudeBox
+                    ? null
+                    : $"the shell is not in claude.exe's Sandboxie {SandboxieBox.Describe(claudeBox)}");
             _shellPool.Warm();
             EmitTiming($"persistent shell: {shellBash}", sw.ElapsedMilliseconds);
         }
         if (registerControlHooks || shellBash != null)
             await InitializeControlChannelAsync(sw, registerControlHooks);
     }
+
+    // null when a shell the agent starts is as contained as claude; else why not.
+    internal static string? ShellSandboxRefusal(string? claudeBox, string? agentBox)
+    {
+        if (claudeBox == "") return null;
+        if (claudeBox == null)
+            return "could not tell which Sandboxie box claude.exe runs in.";
+        if (agentBox == claudeBox) return null;
+        return $"claude.exe runs in Sandboxie box '{claudeBox}' but ClaudeStudioAgent.exe runs in " +
+               $"{SandboxieBox.Describe(agentBox)}, so a shell it starts would not be contained like claude.";
+    }
+
+    // Set when the sandbox check refused the persistent shell: the restart uses
+    // the built-in Bash, keeping the session id the first start announced.
+    private bool _shellRefused;
+    private string? _retrySessionId;
 
     // Parallel tool calls each get a shell up to this many; more wait for one.
     private const int ShellPoolSize = 3;

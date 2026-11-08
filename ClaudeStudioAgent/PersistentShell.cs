@@ -34,10 +34,15 @@ internal sealed class PersistentShell : IAsyncDisposable
     private Task? _startTask;
     private readonly object _startLock = new();
 
-    public PersistentShell(string bashPath, string? workingDirectory)
+    // Checks each started shell (by pid); a non-null message refuses it: the shell
+    // is killed and the command fails with that message.
+    private readonly Func<int, string?>? _verify;
+
+    public PersistentShell(string bashPath, string? workingDirectory, Func<int, string?>? verify = null)
     {
         _bashPath = bashPath;
         _workingDirectory = workingDirectory;
+        _verify = verify;
     }
 
     private bool Alive => _proc is { HasExited: false } && _stdin != null && _stdout != null;
@@ -84,6 +89,12 @@ internal sealed class PersistentShell : IAsyncDisposable
         psi.Environment["GIT_TERMINAL_PROMPT"] = "0";
 
         var proc = Process.Start(psi) ?? throw new InvalidOperationException("could not start " + _bashPath);
+        var refused = _verify?.Invoke(proc.Id);
+        if (refused != null)
+        {
+            KillTree(proc);
+            throw new InvalidOperationException("refused to use the persistent shell: " + refused);
+        }
         var stdin = new StreamWriter(proc.StandardInput.BaseStream, new UTF8Encoding(false)) { NewLine = "\n", AutoFlush = false };
         var stdout = proc.StandardOutput;
         // bash's own stderr (profile noise); commands fold theirs into stdout.
@@ -252,14 +263,16 @@ internal sealed class PersistentShellPool : IAsyncDisposable
 {
     private readonly string _bashPath;
     private readonly string? _workingDirectory;
+    private readonly Func<int, string?>? _verify;
     private readonly SemaphoreSlim _slots;
     private readonly ConcurrentBag<PersistentShell> _idle = new();
     private readonly ConcurrentBag<PersistentShell> _all = new();
 
-    public PersistentShellPool(string bashPath, string? workingDirectory, int size)
+    public PersistentShellPool(string bashPath, string? workingDirectory, int size, Func<int, string?>? verify = null)
     {
         _bashPath = bashPath;
         _workingDirectory = workingDirectory;
+        _verify = verify;
         _slots = new SemaphoreSlim(size, size);
     }
 
@@ -274,7 +287,7 @@ internal sealed class PersistentShellPool : IAsyncDisposable
 
     private PersistentShell New()
     {
-        var shell = new PersistentShell(_bashPath, _workingDirectory);
+        var shell = new PersistentShell(_bashPath, _workingDirectory, _verify);
         _all.Add(shell);
         return shell;
     }

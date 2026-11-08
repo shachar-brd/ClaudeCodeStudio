@@ -1,17 +1,26 @@
-using System.IO.Pipes;
-using System.Text;
-using System.Text.Json;
 using System.Text.Json.Nodes;
-using ClaudeStudioShared;
+using System.Threading.Tasks;
 
-namespace ClaudeStudioAgent;
+namespace ClaudeStudioShared;
 
-// Minimal MCP stdio server (newline-delimited JSON-RPC) that claude spawns via
-// --mcp-config. Exposes vs_build and vs_test, which ask the agent's pipe server to
-// run the build or the tests inside the live Visual Studio instance.
-internal static class McpMode
+// The Visual Studio bridge MCP server (vs_build, vs_test), transport-free. claude
+// declares it as an "sdk" server (--mcp-config {"type":"sdk"}) and tunnels the
+// MCP JSON-RPC messages over its stdio control channel as
+// control_request{subtype:"mcp_message"}; the agent hands each message here and
+// returns the reply as the control_response's mcp_response.
+public static class VsBridgeMcpServer
 {
     public const string ServerName = "claudestudio-vs";
+
+    // Passed to claude with --mcp-config: an in-process server, no command to spawn.
+    public static string McpConfigJson =>
+        new JsonObject
+        {
+            ["mcpServers"] = new JsonObject
+            {
+                [ServerName] = new JsonObject { ["type"] = "sdk", ["name"] = ServerName }
+            }
+        }.ToJsonString();
 
     private const string Instructions =
         "This session runs inside Visual Studio. To build, rebuild or clean the open solution or some of its projects, " +
@@ -67,75 +76,71 @@ internal static class McpMode
         }
     };
 
-    public static async Task<int> RunAsync(string pipeName)
+    // Handles one MCP JSON-RPC message. runBridge runs an encoded VsBridge spec in
+    // Visual Studio and returns its summary ("" = VS gave no result).
+    // workingDirectory is the session's, the base for relative project paths.
+    // Notifications (no id) get an empty result: the control channel still
+    // expects an answer for every mcp_message.
+    public static async Task<JsonObject> HandleAsync(
+        JsonObject message, string? workingDirectory, Func<string, Task<string>> runBridge)
     {
-        using var stdin = new StreamReader(Console.OpenStandardInput(), new UTF8Encoding(false));
-        var stdout = new StreamWriter(Console.OpenStandardOutput(), new UTF8Encoding(false)) { AutoFlush = true, NewLine = "\n" };
+        var method = message["method"] is JsonValue m && m.TryGetValue<string>(out var s) ? s : null;
+        var id = message["id"]?.DeepClone();
+        if (id == null)
+            return new JsonObject { ["jsonrpc"] = "2.0", ["id"] = 0, ["result"] = new JsonObject() };
 
-        string? line;
-        while ((line = await stdin.ReadLineAsync()) != null)
+        JsonNode? result = null;
+        JsonObject? error = null;
+        switch (method)
         {
-            if (string.IsNullOrWhiteSpace(line)) continue;
-            JsonNode? msg;
-            try { msg = JsonNode.Parse(line); } catch { continue; }
-            if (msg is not JsonObject obj) continue;
-
-            var method = obj["method"]?.GetValue<string>();
-            var id = obj["id"]?.DeepClone();
-            if (id == null) continue; // notification
-
-            JsonNode? result = null;
-            JsonObject? error = null;
-            switch (method)
-            {
-                case "initialize":
-                    result = new JsonObject
-                    {
-                        ["protocolVersion"] = obj["params"]?["protocolVersion"]?.GetValue<string>() ?? "2024-11-05",
-                        ["capabilities"] = new JsonObject { ["tools"] = new JsonObject() },
-                        ["serverInfo"] = new JsonObject { ["name"] = ServerName, ["version"] = "1.1.0" },
-                        ["instructions"] = Instructions
-                    };
-                    break;
-                case "ping":
-                    result = new JsonObject();
-                    break;
-                case "tools/list":
-                    result = new JsonObject
-                    {
-                        ["tools"] = new JsonArray(
-                            new JsonObject
-                            {
-                                ["name"] = "vs_build",
-                                ["description"] = "Build, rebuild or clean the solution or specific projects in the running Visual Studio IDE " +
-                                                  "and return success/failure plus Error List errors and warnings. Prefer this over msbuild/dotnet build in the shell.",
-                                ["inputSchema"] = BuildSchema.DeepClone()
-                            },
-                            new JsonObject
-                            {
-                                ["name"] = "vs_test",
-                                ["description"] = "Run unit tests of the open solution from Visual Studio (builds in the IDE first, output in the " +
-                                                  "VS Output window) and return pass/fail counts plus failing tests with messages. Prefer this over dotnet test in the shell.",
-                                ["inputSchema"] = TestSchema.DeepClone()
-                            })
-                    };
-                    break;
-                case "tools/call":
-                    result = await CallToolAsync(pipeName, obj["params"] as JsonObject);
-                    break;
-                default:
-                    error = new JsonObject { ["code"] = -32601, ["message"] = $"Method not found: {method}" };
-                    break;
-            }
-
-            var resp = new JsonObject { ["jsonrpc"] = "2.0", ["id"] = id };
-            if (error != null) resp["error"] = error; else resp["result"] = result;
-            await stdout.WriteLineAsync(resp.ToJsonString());
+            case "initialize":
+                result = new JsonObject
+                {
+                    ["protocolVersion"] = message["params"]?["protocolVersion"] is JsonValue pv &&
+                                          pv.TryGetValue<string>(out var v) ? v : "2024-11-05",
+                    ["capabilities"] = new JsonObject { ["tools"] = new JsonObject() },
+                    ["serverInfo"] = new JsonObject { ["name"] = ServerName, ["version"] = "1.2.0" },
+                    ["instructions"] = Instructions
+                };
+                break;
+            case "ping":
+                result = new JsonObject();
+                break;
+            case "tools/list":
+                result = new JsonObject
+                {
+                    ["tools"] = new JsonArray(
+                        new JsonObject
+                        {
+                            ["name"] = "vs_build",
+                            ["description"] = "Build, rebuild or clean the solution or specific projects in the running Visual Studio IDE " +
+                                              "and return success/failure plus Error List errors and warnings. Prefer this over msbuild/dotnet build in the shell.",
+                            ["inputSchema"] = BuildSchema.DeepClone()
+                        },
+                        new JsonObject
+                        {
+                            ["name"] = "vs_test",
+                            ["description"] = "Run unit tests of the open solution from Visual Studio (builds in the IDE first, output in the " +
+                                              "VS Output window) and return pass/fail counts plus failing tests with messages. Prefer this over dotnet test in the shell.",
+                            ["inputSchema"] = TestSchema.DeepClone()
+                        })
+                };
+                break;
+            case "tools/call":
+                result = await CallToolAsync(message["params"] as JsonObject, workingDirectory, runBridge);
+                break;
+            default:
+                error = new JsonObject { ["code"] = -32601, ["message"] = $"Method not found: {method}" };
+                break;
         }
-        return 0;
+
+        var resp = new JsonObject { ["jsonrpc"] = "2.0", ["id"] = id };
+        if (error != null) resp["error"] = error; else resp["result"] = result;
+        return resp;
     }
 
-    private static async Task<JsonNode> CallToolAsync(string pipeName, JsonObject? p)
+    private static async Task<JsonNode> CallToolAsync(
+        JsonObject? p, string? workingDirectory, Func<string, Task<string>> runBridge)
     {
         var args = p?["arguments"] as JsonObject;
         string Arg(string n) => args?[n] is JsonValue v && v.TryGetValue<string>(out var s) ? s.Trim() : "";
@@ -154,7 +159,7 @@ internal static class McpMode
 
         string spec;
         bool test;
-        switch (p?["name"]?.GetValue<string>())
+        switch (p?["name"] is JsonValue nv && nv.TryGetValue<string>(out var name) ? name : null)
         {
             case "vs_build":
             {
@@ -171,7 +176,7 @@ internal static class McpMode
                     Action = action,
                     Projects = projects,
                     Configuration = config == "" ? null : config,
-                    WorkingDirectory = Environment.CurrentDirectory
+                    WorkingDirectory = workingDirectory
                 });
                 test = false;
                 break;
@@ -185,7 +190,7 @@ internal static class McpMode
                     Projects = Projects(),
                     Filter = filter == "" ? null : filter,
                     Build = build,
-                    WorkingDirectory = Environment.CurrentDirectory
+                    WorkingDirectory = workingDirectory
                 });
                 test = true;
                 break;
@@ -194,30 +199,17 @@ internal static class McpMode
                 return ToolResult("Unknown tool.", true);
         }
 
-        try
-        {
-            await using var pipe = new NamedPipeClientStream(".", pipeName, PipeDirection.InOut, PipeOptions.Asynchronous);
-            await pipe.ConnectAsync(5000);
-            var req = new { type = "build_request", request_id = Guid.NewGuid().ToString("N"), spec };
-            var bytes = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(req) + "\n");
-            await pipe.WriteAsync(bytes);
-            await pipe.FlushAsync();
-
-            using var reader = new StreamReader(pipe, new UTF8Encoding(false), false, 4096, leaveOpen: true);
-            var line = await reader.ReadLineAsync();
-            if (string.IsNullOrWhiteSpace(line)) return ToolResult("No response from Visual Studio bridge.", true);
-            var text = JsonDocument.Parse(line).RootElement.GetProperty("text").GetString() ?? "";
-            return ToolResult(text, !IsSuccess(text, test));
-        }
-        catch (Exception ex)
-        {
-            return ToolResult($"Visual Studio bridge unavailable: {ex.Message}", true);
-        }
+        string text;
+        try { text = await runBridge(spec); }
+        catch (Exception ex) { return ToolResult($"Visual Studio bridge unavailable: {ex.Message}", true); }
+        if (string.IsNullOrWhiteSpace(text))
+            text = "Visual Studio did not return a result. Is a solution open in the IDE with the Claude Code Studio window running?";
+        return ToolResult(text, !IsSuccess(text, test));
     }
 
     // The extension's success summaries start with these; anything else (errors,
     // failed tests, "not found") is reported as a tool error.
-    private static bool IsSuccess(string text, bool test) => test
+    public static bool IsSuccess(string text, bool test) => test
         ? text.StartsWith("Tests passed", StringComparison.Ordinal)
         : text.StartsWith("Clean of ", StringComparison.Ordinal) ||
           ((text.StartsWith("Build of ", StringComparison.Ordinal) || text.StartsWith("Rebuild of ", StringComparison.Ordinal))

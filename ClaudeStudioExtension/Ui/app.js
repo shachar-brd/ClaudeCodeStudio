@@ -3254,14 +3254,14 @@ function togglePermExamples(open) {
     localStorage.setItem("permRulesExamplesOpen", open ? "true" : "false");
 }
 
-// Mirrors the parser in PermissionPipeServer.SetRules. That parser only keeps
+// Mirrors the parser in PermissionBroker.SetRules. That parser only keeps
 // rules whose regex matches, so anything malformed used to be accepted here,
 // shown as a chip, and then silently dropped by the agent — a rule that looks
 // active and does nothing. `PowerShell *` is the trap that surfaced it (rodada
 // 18): the bare `*` is neither a specifier nor the end of the string.
 // Hyphens and dots are legal in MCP server names (mcp__github-tools__search), so
 // the tool part accepts them. Must stay in step with the parser in
-// PermissionPipeServer.SetRules — a rule this accepts and that one rejects is a
+// PermissionBroker.SetRules — a rule this accepts and that one rejects is a
 // chip in the list that decides nothing.
 const PERM_RULE_RE = /^[A-Za-z_][A-Za-z0-9_.-]*\s*(\(.*\))?$/;
 

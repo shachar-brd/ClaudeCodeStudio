@@ -12,7 +12,7 @@ namespace ClaudeStudioShared;
 /// <para>
 /// This lives in Shared because the resolution had drifted into three copies — the
 /// extension's <c>ClaudePaths</c>, the agent's settings-file merge, and
-/// <c>PermissionPipeServer.PlansDir</c> — and they had already stopped agreeing:
+/// <c>PermissionBroker.PlansDir</c> — and they had already stopped agreeing:
 /// only some of them honoured a redirected <c>USERPROFILE</c>, and only some trimmed
 /// a trailing separator, so <c>CLAUDE_CONFIG_DIR=D:\cfg\</c> resolved to two
 /// different places depending on which one you asked.

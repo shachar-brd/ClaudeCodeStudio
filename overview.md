@@ -14,7 +14,7 @@ Unlike terminal-embedding extensions, Claude Code Studio does **not** host a con
 - **Font zoom** — Ctrl+Scroll zooms the whole chat; the level persists across sessions.
 
 ### Permissions & modes
-- **Inline permission prompts** — tool calls that need approval surface a modal with **Allow**, **Allow for session**, and **Deny**, showing the working directory the call runs in. Backed by a `PreToolUse` hook over a named pipe, not a terminal prompt.
+- **Inline permission prompts** — tool calls that need approval surface a modal with **Allow**, **Allow for session**, and **Deny**, showing the working directory the call runs in. Backed by a `PreToolUse` hook on the CLI's stdio control channel, not a terminal prompt.
 - **Permission modes** — switch between **ask**, **plan** (Exit Plan Mode becomes an explicit "Approve plan" modal), **bypass permissions** (yolo), and **don't ask** (read-only: reads and searches run freely, all edits are blocked by the CLI).
 - **Permission rules** — allow / deny / ask rules honored per session.
 

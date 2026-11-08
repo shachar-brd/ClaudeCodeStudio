@@ -1,13 +1,19 @@
 using System.Collections.Concurrent;
-using System.IO.Pipes;
-using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
 using ClaudeStudioShared;
 
 namespace ClaudeStudioAgent;
 
-internal sealed class PermissionPipeServer : IAsyncDisposable
+// Decides PreToolUse permission (rules, session allows, the UI modal), fetches
+// post-edit diagnostics and runs Visual Studio bridge requests (vs_build,
+// vs_test). claude reaches it through its stdio control channel — hook_callback
+// and mcp_message control_requests that ClaudeSession dispatches here — so no
+// helper process or named pipe is involved. Talks to the extension by writing
+// ChatChunk lines (permission_request, diagnostics_request) to our stdout; the
+// answers come back through Respond / RespondDiagnostics.
+internal sealed class PermissionBroker : IAsyncDisposable
 {
     // 0 = wait for the answer, bounded by HardCeiling (the "wait (max 1 hour)"
     // option); a positive value denies after that many minutes. Swapped per chat
@@ -22,35 +28,27 @@ internal sealed class PermissionPipeServer : IAsyncDisposable
     /// "Wait for answer" is about the user taking their time; it is not a promise to
     /// block forever on a prompt nobody can see. If the card never renders — the
     /// webview reloaded, the tool window was closed without cancelling, the dispatcher
-    /// call threw — claude stays parked inside PreToolUse and both it and the resident
-    /// hook process leak for the rest of the session. The old three-minute clock
-    /// papered over all of those; this restores a floor without touching what the
-    /// setting means.
+    /// call threw — claude stays parked inside PreToolUse for the rest of the session.
+    /// The old three-minute clock papered over all of those; this restores a floor
+    /// without touching what the setting means.
     /// <para>
-    /// This is also a security bound, not just a convenience one. Measured against the
-    /// live CLI: a PreToolUse command hook that hits its own timeout does NOT block the
-    /// tool — the call proceeds through the normal permission flow, which under
-    /// bypassPermissions means it runs. The CLI's default hook timeout is 600s, so a
-    /// wait longer than that used to let the tool execute unapproved once the hook was
-    /// killed (the "pipe is broken" the extension logged is the server then writing to
-    /// the dead hook). This ceiling MUST stay strictly below <see cref="HookTimeoutSeconds"/>
-    /// so the server always denies before the hook can time out and open that window.
+    /// It used to be a security bound too: a PreToolUse *command* hook that hits its
+    /// timeout does not block the tool, so under bypassPermissions it ran unapproved.
+    /// Callback hooks fail closed instead (probed on 2.1.309: "The tool call was not
+    /// executed"), but the ceiling stays strictly below <see cref="HookTimeoutSeconds"/>
+    /// so the user always sees a deny with a reason, not a hook timeout.
     /// </para>
     /// </remarks>
     private static readonly TimeSpan HardCeiling = TimeSpan.FromHours(1);
 
     /// <summary>
-    /// The `timeout` (seconds) written onto the CLI's PreToolUse hook, so the hook
-    /// outlives the longest wait this server can perform. Verified against the live CLI:
-    /// a large explicit value is accepted and honoured (the default is only 600s). Kept
-    /// above <see cref="HardCeiling"/> by a margin so the ceiling always fires first —
-    /// if the hook timed out first, the tool would run without approval.
+    /// The `timeout` (seconds) registered for the PreToolUse callback, so the hook
+    /// outlives the longest wait this broker can perform (the CLI default is 600s).
+    /// Kept above <see cref="HardCeiling"/> by a margin so the ceiling always fires first.
     /// </summary>
     public static int HookTimeoutSeconds => (int)HardCeiling.TotalSeconds + 300;
 
     public void SetPermissionTimeout(int minutes) => _timeoutMinutes = minutes > 0 ? minutes : 0;
-
-    public string PipeName { get; }
 
     // Diagnostics requests time out faster than permission — they're a courtesy,
     // never worth stalling the turn for long.
@@ -61,17 +59,6 @@ internal sealed class PermissionPipeServer : IAsyncDisposable
     private readonly ConcurrentDictionary<string, TaskCompletionSource<string>> _pendingDiag = new();
     private readonly HashSet<string> _sessionAllowed = new();
     private readonly object _sessionAllowedLock = new();
-    private Task? _acceptLoop;
-
-    public PermissionPipeServer()
-    {
-        PipeName = $"claudestudio-perm-{Environment.ProcessId}";
-    }
-
-    public void Start()
-    {
-        _acceptLoop = Task.Run(() => AcceptLoopAsync(_cts.Token));
-    }
 
     public bool Respond(string toolUseId, bool allow, string? reason)
     {
@@ -88,8 +75,8 @@ internal sealed class PermissionPipeServer : IAsyncDisposable
     }
 
     // Deny every wait still blocking a hook (turn canceled). claude sits inside
-    // PreToolUse until the hook returns — disposing the session while it was
-    // blocked left the process ignoring stdin-close and the cancel wedged
+    // PreToolUse until the callback is answered — disposing the session while it
+    // was blocked left the process ignoring stdin-close and the cancel wedged
     // (rodada 12). Entries are removed by each handler's finally, not here.
     public void FailPending(string reason)
     {
@@ -234,81 +221,27 @@ internal sealed class PermissionPipeServer : IAsyncDisposable
         return Regex.IsMatch(value, pattern, RegexOptions.IgnoreCase | RegexOptions.Singleline);
     }
 
-    private async Task AcceptLoopAsync(CancellationToken ct)
+    // PreToolUse (hook_callback). Rule evaluation first (deny > ask > allow), then
+    // the session allowlist short-circuit, then the UI modal. An ask-rule match
+    // forces the modal even when the tool was session-allowed or has an allow rule.
+    // Returns the callback output: Continue (claude's normal flow, which under
+    // bypassPermissions runs the tool) or a deny with the reason claude sees.
+    public async Task<JsonObject> DecidePreToolUseAsync(ControlHooks.HookCall call)
     {
-        while (!ct.IsCancellationRequested)
+        var ct = _cts.Token;
+        var toolUseId = call.ToolUseId;
+        var toolName = call.ToolName;
+        var toolInput = call.ToolInputJson;
+        var cwd = call.Cwd;
+
+        if (string.IsNullOrEmpty(toolUseId) || string.IsNullOrEmpty(toolName))
         {
-            NamedPipeServerStream? server = null;
-            try
-            {
-                server = new NamedPipeServerStream(
-                    PipeName,
-                    PipeDirection.InOut,
-                    NamedPipeServerStream.MaxAllowedServerInstances,
-                    PipeTransmissionMode.Byte,
-                    PipeOptions.Asynchronous);
-
-                await server.WaitForConnectionAsync(ct);
-
-                var connection = server;
-                server = null;
-                _ = Task.Run(() => HandleConnectionAsync(connection, ct));
-            }
-            catch (OperationCanceledException) { break; }
-            catch (Exception ex)
-            {
-                EmitError($"pipe accept loop error: {ex.Message}");
-                server?.Dispose();
-                try { await Task.Delay(100, ct); } catch { break; }
-            }
+            EmitError("hook: callback missing tool_use_id or tool_name");
+            return ControlHooks.DenyPreToolUse("Permission denied: malformed permission request");
         }
-    }
 
-    private async Task HandleConnectionAsync(NamedPipeServerStream pipe, CancellationToken ct)
-    {
-        string? toolUseId = null;
-        TaskCompletionSource<Decision>? tcs = null;
         try
         {
-            using var reader = new StreamReader(pipe, new UTF8Encoding(false), false, 4096, leaveOpen: true);
-            var requestLine = await reader.ReadLineAsync(ct);
-            if (string.IsNullOrWhiteSpace(requestLine)) return;
-
-            JsonElement req;
-            try { req = JsonSerializer.Deserialize<JsonElement>(requestLine); }
-            catch (Exception ex)
-            {
-                EmitError($"pipe: failed to parse request: {ex.Message}");
-                return;
-            }
-
-            var reqType = req.TryGetProperty("type", out var rt) ? rt.GetString() : "perm_request";
-            if (reqType == "diag_request")
-            {
-                await HandleDiagRequestAsync(pipe, req, ct);
-                return;
-            }
-
-            if (reqType == "build_request")
-            {
-                await HandleBuildRequestAsync(pipe, req, ct);
-                return;
-            }
-
-            toolUseId = req.TryGetProperty("tool_use_id", out var tid) ? tid.GetString() : null;
-            var toolName = req.TryGetProperty("tool_name", out var tn) ? tn.GetString() : null;
-            var toolInput = req.TryGetProperty("tool_input", out var ti) ? ti.GetRawText() : null;
-            var cwd = req.TryGetProperty("cwd", out var cw) ? cw.GetString() : null;
-
-            if (string.IsNullOrEmpty(toolUseId) || string.IsNullOrEmpty(toolName))
-            {
-                EmitError("pipe: request missing tool_use_id or tool_name");
-                return;
-            }
-
-            // Rule evaluation first (deny > ask > allow), then the session
-            // allowlist short-circuit. An ask-rule match forces the modal even
-            // when the tool was session-allowed or has an allow rule.
             var (verdict, matchedRule) = EvaluateRules(toolName!, toolInput);
 
             // A decision taken here never reaches the UI, so without a line in the
@@ -354,58 +287,7 @@ internal sealed class PermissionPipeServer : IAsyncDisposable
             {
                 if (verdict == RuleVerdict.Ask)
                     LogAuto($"prompting: forced by ask rule: {matchedRule}");
-                tcs = new TaskCompletionSource<Decision>(TaskCreationOptions.RunContinuationsAsynchronously);
-                if (!_pending.TryAdd(toolUseId!, tcs))
-                {
-                    EmitError($"pipe: duplicate tool_use_id {toolUseId}");
-                    return;
-                }
-
-                EmitChunk(new ChatChunk
-                {
-                    Type = "permission_request",
-                    Tool = toolName,
-                    ToolInput = toolInput,
-                    ToolId = toolUseId,
-                    Cwd = cwd
-                });
-
-                // The user's setting, bounded by the ceiling. Cancel and shutdown still
-                // release the wait through ct, exactly as before.
-                int minutes = _timeoutMinutes;
-                var wait = minutes > 0 ? TimeSpan.FromMinutes(minutes) : HardCeiling;
-
-                // Linked source so the timer is disposed the moment the user answers:
-                // a bare Task.Delay(…, ct) leaves its registration on the token until
-                // the server shuts down, and at one per prompt a long session
-                // accumulates them.
-                using var timer = CancellationTokenSource.CreateLinkedTokenSource(ct);
-                var timeoutTask = Task.Delay(wait, timer.Token);
-
-                var completed = await Task.WhenAny(tcs.Task, timeoutTask);
-                timer.Cancel();
-
-                if (completed == tcs.Task)
-                {
-                    decision = await tcs.Task;
-                }
-                else if (ct.IsCancellationRequested)
-                {
-                    decision = new Decision(false, "Agent shutting down", Auto: true);
-                }
-                else if (minutes <= 0)
-                {
-                    // Only reachable through the ceiling, so say so rather than
-                    // reporting a timeout the user never configured.
-                    decision = new Decision(
-                        false,
-                        $"No answer after {HardCeiling.TotalHours:F0}h — the prompt may never have appeared",
-                        Auto: true);
-                }
-                else
-                {
-                    decision = new Decision(false, $"Permission timed out ({minutes}min)", Auto: true);
-                }
+                decision = await PromptAsync(toolUseId!, toolName!, toolInput, cwd, ct);
             }
 
             // Nobody clicked: retract the card before claude moves on, so it can
@@ -421,36 +303,89 @@ internal sealed class PermissionPipeServer : IAsyncDisposable
             }
 
             // An approved plain shell build runs in VS instead (Output window, Error
-            // List). Only after approval: the build executes project targets outside
-            // the sandbox, so it must not skip the prompt the shell command gets.
+            // List) and its result goes back to claude as the denial reason, so the
+            // shell build never runs. Only after approval: the build executes
+            // project targets outside the sandbox, so it must not skip the prompt
+            // the shell command gets. If VS cannot take it, the command runs as
+            // approved.
             if (decision.Allow && toolName is "Bash" or "PowerShell"
-                && BuildCommandParser.TryParse(ExtractCommand(toolInput), cwd, out var buildSpec)
-                && await TryRunBuildInVsAsync(pipe, toolUseId!, buildSpec, ct))
-                return;
-
-            var responseObj = new
+                && BuildCommandParser.TryParse(ExtractCommand(toolInput), cwd, out var buildSpec))
             {
-                type = "perm_response",
-                tool_use_id = toolUseId,
-                decision = decision.Allow ? "allow" : "deny",
-                reason = decision.Reason
-            };
-            var responseLine = JsonSerializer.Serialize(responseObj) + "\n";
-            var bytes = Encoding.UTF8.GetBytes(responseLine);
-            await pipe.WriteAsync(bytes, ct);
-            await pipe.FlushAsync(ct);
+                var text = await RunBridgeAsync(toolUseId!, VsBridge.Encode(buildSpec));
+                if (!string.IsNullOrWhiteSpace(text))
+                    decision = new Decision(false, "The shell build was not run. Visual Studio ran it instead " +
+                                                   "(visible in its Output window). Result:\n" + text);
+            }
+
+            if (decision.Allow) return ControlHooks.Continue();
+            return ControlHooks.DenyPreToolUse(!string.IsNullOrEmpty(decision.Reason)
+                ? $"Permission denied: {decision.Reason}"
+                : "Permission denied by user");
         }
-        catch (OperationCanceledException) { }
         catch (Exception ex)
         {
-            EmitError($"pipe handler error: {ex.Message}");
+            EmitError($"permission handler error: {ex.Message}");
+            return ControlHooks.DenyPreToolUse($"Permission denied: {ex.Message}");
+        }
+    }
+
+    // Shows the modal and waits for Respond, bounded by the user's timeout and the
+    // ceiling. Cancel and shutdown release the wait through ct.
+    private async Task<Decision> PromptAsync(string toolUseId, string toolName, string? toolInput, string? cwd, CancellationToken ct)
+    {
+        var tcs = new TaskCompletionSource<Decision>(TaskCreationOptions.RunContinuationsAsynchronously);
+        if (!_pending.TryAdd(toolUseId, tcs))
+        {
+            EmitError($"hook: duplicate tool_use_id {toolUseId}");
+            return new Decision(false, "duplicate permission request", Auto: true);
+        }
+
+        try
+        {
+            EmitChunk(new ChatChunk
+            {
+                Type = "permission_request",
+                Tool = toolName,
+                ToolInput = toolInput,
+                ToolId = toolUseId,
+                Cwd = cwd
+            });
+
+            int minutes = _timeoutMinutes;
+            var wait = minutes > 0 ? TimeSpan.FromMinutes(minutes) : HardCeiling;
+
+            // Linked source so the timer is disposed the moment the user answers:
+            // a bare Task.Delay(…, ct) leaves its registration on the token until
+            // the broker shuts down, and at one per prompt a long session
+            // accumulates them.
+            using var timer = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            var timeoutTask = Task.Delay(wait, timer.Token);
+
+            var completed = await Task.WhenAny(tcs.Task, timeoutTask);
+            timer.Cancel();
+
+            if (completed == tcs.Task)
+                return await tcs.Task;
+            if (ct.IsCancellationRequested)
+                return new Decision(false, "Agent shutting down", Auto: true);
+            if (minutes <= 0)
+            {
+                // Only reachable through the ceiling, so say so rather than
+                // reporting a timeout the user never configured.
+                return new Decision(
+                    false,
+                    $"No answer after {HardCeiling.TotalHours:F0}h — the prompt may never have appeared",
+                    Auto: true);
+            }
+            return new Decision(false, $"Permission timed out ({minutes}min)", Auto: true);
+        }
+        catch (OperationCanceledException)
+        {
+            return new Decision(false, "Agent shutting down", Auto: true);
         }
         finally
         {
-            if (toolUseId != null)
-                _pending.TryRemove(toolUseId, out _);
-            try { pipe.Disconnect(); } catch { }
-            await pipe.DisposeAsync();
+            _pending.TryRemove(toolUseId, out _);
         }
     }
 
@@ -472,7 +407,7 @@ internal sealed class PermissionPipeServer : IAsyncDisposable
 
     // Asks the extension to run a VsBridge request (build or test) inside Visual
     // Studio and waits for the result text. Empty = VS gave no result.
-    private async Task<string> RequestBridgeTextAsync(string requestId, string spec, CancellationToken ct)
+    public async Task<string> RunBridgeAsync(string requestId, string spec)
     {
         var tcs = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
         if (!_pendingDiag.TryAdd(requestId, tcs)) return "";
@@ -482,7 +417,7 @@ internal sealed class PermissionPipeServer : IAsyncDisposable
         try
         {
             EmitChunk(new ChatChunk { Type = "diagnostics_request", ToolId = requestId, Text = spec });
-            var completed = await Task.WhenAny(tcs.Task, Task.Delay(timeout, ct));
+            var completed = await Task.WhenAny(tcs.Task, Task.Delay(timeout, _cts.Token));
             if (completed == tcs.Task) text = await tcs.Task;
         }
         catch (OperationCanceledException) { }
@@ -490,82 +425,29 @@ internal sealed class PermissionPipeServer : IAsyncDisposable
         return text;
     }
 
-    // From the MCP server (vs_build / vs_test): spec is an encoded VsBridge request.
-    private async Task HandleBuildRequestAsync(NamedPipeServerStream pipe, JsonElement req, CancellationToken ct)
+    // PostToolUse (hook_callback): the VS Error List entries of the edited file, or
+    // "" when there are none or VS did not answer in time.
+    public async Task<string> GetDiagnosticsAsync(string? requestId, string? filePath)
     {
-        string Get(string name) => req.TryGetProperty(name, out var v) ? v.GetString() ?? "" : "";
-        var id = Get("request_id");
-        var spec = Get("spec");
-        var text = string.IsNullOrEmpty(id) || !VsBridge.IsBridgeRequest(spec)
-            ? ""
-            : await RequestBridgeTextAsync(id, spec, ct);
-        if (string.IsNullOrWhiteSpace(text))
-            text = "Visual Studio did not return a result. Is a solution open in the IDE with the Claude Code Studio window running?";
+        if (string.IsNullOrEmpty(requestId) || string.IsNullOrEmpty(filePath)) return "";
 
-        var bytes = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(new { type = "build_response", text }) + "\n");
+        var tcs = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+        if (!_pendingDiag.TryAdd(requestId!, tcs)) return "";
         try
         {
-            await pipe.WriteAsync(bytes, ct);
-            await pipe.FlushAsync(ct);
-        }
-        catch (OperationCanceledException) { }
-    }
-
-    // Runs an approved shell build inside Visual Studio and hands the result back
-    // to claude as the denial reason, so the shell build never runs. Returns false
-    // (the shell command runs as approved) if VS could not take it.
-    private async Task<bool> TryRunBuildInVsAsync(NamedPipeServerStream pipe, string toolUseId, VsBuildSpec spec, CancellationToken ct)
-    {
-        var text = await RequestBridgeTextAsync(toolUseId, VsBridge.Encode(spec), ct);
-
-        if (string.IsNullOrWhiteSpace(text)) return false;
-
-        var reason = "The shell build was not run. Visual Studio ran it instead " +
-                     "(visible in its Output window). Result:\n" + text;
-        var responseObj = new { type = "perm_response", tool_use_id = toolUseId, decision = "deny", reason };
-        var bytes = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(responseObj) + "\n");
-        await pipe.WriteAsync(bytes, ct);
-        await pipe.FlushAsync(ct);
-        return true;
-    }
-
-    private async Task HandleDiagRequestAsync(NamedPipeServerStream pipe, JsonElement req, CancellationToken ct)
-    {
-        string? requestId = req.TryGetProperty("request_id", out var ri) ? ri.GetString() : null;
-        var filePath = req.TryGetProperty("file_path", out var fp) ? fp.GetString() : null;
-        var text = "";
-
-        if (!string.IsNullOrEmpty(requestId) && !string.IsNullOrEmpty(filePath))
-        {
-            var tcs = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
-            if (_pendingDiag.TryAdd(requestId!, tcs))
+            // Ask the extension to read the VS Error List for this file.
+            EmitChunk(new ChatChunk
             {
-                try
-                {
-                    // Ask the extension to read the VS Error List for this file.
-                    EmitChunk(new ChatChunk
-                    {
-                        Type = "diagnostics_request",
-                        ToolId = requestId,
-                        Text = filePath
-                    });
+                Type = "diagnostics_request",
+                ToolId = requestId,
+                Text = filePath
+            });
 
-                    var completed = await Task.WhenAny(tcs.Task, Task.Delay(DiagnosticsTimeout, ct));
-                    if (completed == tcs.Task) text = await tcs.Task;
-                }
-                catch (OperationCanceledException) { }
-                finally { _pendingDiag.TryRemove(requestId!, out _); }
-            }
+            var completed = await Task.WhenAny(tcs.Task, Task.Delay(DiagnosticsTimeout, _cts.Token));
+            return completed == tcs.Task ? await tcs.Task : "";
         }
-
-        var responseObj = new { type = "diag_response", request_id = requestId, text };
-        var bytes = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(responseObj) + "\n");
-        try
-        {
-            await pipe.WriteAsync(bytes, ct);
-            await pipe.FlushAsync(ct);
-        }
-        catch (OperationCanceledException) { }
+        catch (OperationCanceledException) { return ""; }
+        finally { _pendingDiag.TryRemove(requestId!, out _); }
     }
 
     private static void EmitChunk(ChatChunk chunk)
@@ -587,7 +469,7 @@ internal sealed class PermissionPipeServer : IAsyncDisposable
         Console.Out.Flush();
     }
 
-    public async ValueTask DisposeAsync()
+    public ValueTask DisposeAsync()
     {
         try { _cts.Cancel(); } catch { }
         foreach (var kvp in _pending)
@@ -596,11 +478,8 @@ internal sealed class PermissionPipeServer : IAsyncDisposable
         foreach (var kvp in _pendingDiag)
             kvp.Value.TrySetResult("");
         _pendingDiag.Clear();
-        if (_acceptLoop != null)
-        {
-            try { await _acceptLoop.WaitAsync(TimeSpan.FromSeconds(2)); } catch { }
-        }
         _cts.Dispose();
+        return default;
     }
 
     // Auto marks a decision nobody clicked — timeout, cancel, shutdown. The card

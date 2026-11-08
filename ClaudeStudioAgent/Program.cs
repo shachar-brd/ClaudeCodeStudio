@@ -7,34 +7,15 @@ using System.Threading.Channels;
 using ClaudeStudioAgent;
 using ClaudeStudioShared;
 
-// Hook mode: when claude.exe spawns us as a PreToolUse hook, route to HookMode
-// and exit. This branch never enters the normal request loop.
-if (args.Length >= 2 && args[0] == "--hook")
-{
-    return await HookMode.RunAsync(args[1]);
-}
-
-// PostToolUse hook: queries the extension for the edited file's diagnostics and
-// surfaces them to claude. Also a one-shot subprocess, never the request loop.
-if (args.Length >= 2 && args[0] == "--hook-post")
-{
-    return await HookMode.RunPostAsync(args[1]);
-}
-
-// MCP stdio server (vs_build tool): spawned by claude via --mcp-config.
-if (args.Length >= 2 && args[0] == "--mcp")
-{
-    return await McpMode.RunAsync(args[1]);
-}
-
-// Phase 2 (gated): when enabled, the agent stands up a named pipe server that
-// hook helper processes connect to in order to broker permission prompts.
-PermissionPipeServer? pipeServer = null;
+// Phase 2 (gated): when enabled, ask/plan sessions register PreToolUse and
+// PostToolUse hooks and the VS bridge MCP server on claude's stdio control
+// channel, and this broker answers them (permission modal, diagnostics,
+// vs_build/vs_test). Nothing is spawned per tool call: up to 1.1.18 claude ran
+// this exe as a command hook (--hook/--hook-post) and MCP server (--mcp) that
+// called back over a named pipe.
+PermissionBroker? broker = null;
 if (Environment.GetEnvironmentVariable("CLAUDESTUDIO_HOOK_ENABLE") == "1")
-{
-    pipeServer = new PermissionPipeServer();
-    pipeServer.Start();
-}
+    broker = new PermissionBroker();
 
 // Sweep stale hook-settings temp dirs left behind by crashed agent processes.
 // Each "ask" session creates `%TEMP%/claudestudio-<pid>-<guid>/` and deletes it
@@ -108,11 +89,11 @@ var stdinReader = Task.Run(async () =>
             {
                 var pr = request.PermissionResponse;
                 if (!string.IsNullOrEmpty(pr.AllowSession))
-                    pipeServer?.AllowForSession(pr.AllowSession);
+                    broker?.AllowForSession(pr.AllowSession);
 
-                // Hook-pipe prompts first; control-channel gates (ExitPlanMode
+                // PreToolUse prompts first; can_use_tool gates (ExitPlanMode
                 // plan approval) ride the same PermissionResponse message.
-                if (pipeServer?.Respond(pr.ToolUseId, pr.Allow, pr.Reason) == true)
+                if (broker?.Respond(pr.ToolUseId, pr.Allow, pr.Reason) == true)
                     continue;
                 var controlHandled = false;
                 if (session != null)
@@ -127,13 +108,13 @@ var stdinReader = Task.Run(async () =>
 
             if (request.DiagnosticsResponse != null)
             {
-                if (pipeServer == null)
+                if (broker == null)
                 {
-                    EmitError("diagnostics response received but hook server is disabled");
+                    EmitError("diagnostics response received but the hook broker is disabled");
                     continue;
                 }
                 var dr = request.DiagnosticsResponse;
-                pipeServer.RespondDiagnostics(dr.RequestId, dr.Text);
+                broker.RespondDiagnostics(dr.RequestId, dr.Text);
                 continue;
             }
 
@@ -160,7 +141,7 @@ var stdinReader = Task.Run(async () =>
                 // second cancel was never read and no done was ever emitted
                 // (rodada 12). With the denies delivered, claude can wind down
                 // and the dispose below completes normally.
-                pipeServer?.FailPending("Turn canceled by user");
+                broker?.FailPending("Turn canceled by user");
 
                 // Hard cancel: dispose the active session so SendMessageAsync's
                 // read loop in the main loop sees ObjectDisposedException, the
@@ -286,8 +267,8 @@ try
         // Permission rules ride along with every chat request; refreshing them
         // here (not at spawn) means edits in the UI apply on the next send
         // without restarting the session.
-        pipeServer?.SetRules(PermissionRuleMerge.Merge(request.ClaudeSettings, request.WorkingDirectory));
-        pipeServer?.SetPermissionTimeout(request.ClaudeSettings?.PermissionTimeoutMinutes ?? 0);
+        broker?.SetRules(PermissionRuleMerge.Merge(request.ClaudeSettings, request.WorkingDirectory));
+        broker?.SetPermissionTimeout(request.ClaudeSettings?.PermissionTimeoutMinutes ?? 0);
 
         var wantKey = ClaudeSession.MakeKey(request);
 
@@ -322,7 +303,7 @@ try
         if (session == null || session.Key != wantKey || !session.IsAlive)
         {
             if (session != null) await session.DisposeAsync();
-            session = new ClaudeSession(request, pipeServer?.PipeName);
+            session = new ClaudeSession(request, broker);
             try
             {
                 await session.StartAsync();
@@ -368,7 +349,7 @@ finally
     requestChannel.Writer.TryComplete();
     try { await stdinReader; } catch { }
     if (session != null) await session.DisposeAsync();
-    if (pipeServer != null) await pipeServer.DisposeAsync();
+    if (broker != null) await broker.DisposeAsync();
 }
 
 return 0;
@@ -403,7 +384,7 @@ sealed class ClaudeSession : IAsyncDisposable
     private readonly string? _resumeSessionId;
     private readonly bool _forkSession;
     private readonly bool _autoResume;
-    private readonly string? _pipeName;
+    private readonly PermissionBroker? _broker;
     private readonly ClaudeSettings? _claudeSettings;
     private readonly string? _cliPath;
     private readonly string? _sessionName;
@@ -456,7 +437,7 @@ sealed class ClaudeSession : IAsyncDisposable
     // consults this instead and respawns when false.
     public bool IsAlive => _proc != null && !_proc.HasExited && _stdin != null && _stdout != null;
 
-    public ClaudeSession(ChatRequest request, string? pipeName)
+    public ClaudeSession(ChatRequest request, PermissionBroker? broker)
     {
         _model = request.Model ?? "claude-sonnet-5";
         _effort = request.Effort;
@@ -465,7 +446,7 @@ sealed class ClaudeSession : IAsyncDisposable
         _resumeSessionId = request.ResumeSessionId;
         _forkSession = request.ForkSession;
         _autoResume = request.AutoResume;
-        _pipeName = pipeName;
+        _broker = broker;
         _claudeSettings = request.ClaudeSettings;
         _cliPath = request.CliPath;
         _maxBudgetUsd = request.MaxBudgetUsd;
@@ -484,11 +465,11 @@ sealed class ClaudeSession : IAsyncDisposable
 
     // Live permission-mode switch without a respawn (set_permission_mode over
     // stdio, PoC-confirmed on 2.1.144). Maps UI modes to CLI modes the same way
-    // the spawn does: plan → plan; ask → bypassPermissions when the hook pipe
+    // the spawn does: plan → plan; ask → bypassPermissions when the hook broker
     // is the gatekeeper, else claude's default mode.
     public async Task<bool> SwitchPermissionModeAsync(string uiMode)
     {
-        var cliMode = uiMode == "plan" ? "plan" : (_pipeName != null ? "bypassPermissions" : "default");
+        var cliMode = uiMode == "plan" ? "plan" : (_broker != null ? "bypassPermissions" : "default");
         var resp = await SendControlRequestAsync(new { subtype = "set_permission_mode", mode = cliMode }, "set-permission-mode", quietErrors: true);
         if (resp == null) return false;
         UiPermissionMode = uiMode;
@@ -525,14 +506,14 @@ sealed class ClaudeSession : IAsyncDisposable
 
     // #19: what claude's own init.permissionMode should read back as, given
     // how each UI mode actually spawns (mirrors the branches ~line 622+).
-    // "ask" reports "bypassPermissions" too when a hook pipe is gatekeeping —
+    // "ask" reports "bypassPermissions" too when the hook broker is gatekeeping —
     // that's the expected, correct case, not a mismatch.
     private string ExpectedCliPermissionMode() => _permissionMode switch
     {
         "yolo" => "bypassPermissions",
         "dontAsk" => "dontAsk",
         "plan" => "plan",
-        _ => _pipeName != null ? "bypassPermissions" : "default", // "ask"
+        _ => _broker != null ? "bypassPermissions" : "default", // "ask"
     };
 
     // Appended to claude's system prompt (--append-system-prompt). Mirrors the
@@ -561,6 +542,10 @@ The user's IDE selection (if any) is included in the conversation context and ma
     public async Task StartAsync()
     {
         var sw = Stopwatch.StartNew();
+
+        // Set by the ask/plan branch when the broker gates tools: the hooks are
+        // registered right after spawn, and the session must not run without them.
+        bool registerControlHooks = false;
 
         var psi = new ProcessStartInfo
         {
@@ -635,16 +620,11 @@ The user's IDE selection (if any) is included in the conversation context and ma
         // to plain-text noise. With it, claude emits a `control_request`
         // {subtype:"can_use_tool", tool_name:"AskUserQuestion"} on stdout and we
         // reply with a `control_response` on stdin that becomes the real
-        // tool_result. PoC-confirmed to coexist with bypassPermissions + the
-        // PreToolUse hook (permission for Bash/Edit/Write still flows through the
-        // named pipe; only intrinsically-interactive tools use this channel).
+        // tool_result. The same channel carries the PreToolUse/PostToolUse hook
+        // callbacks and the VS bridge MCP server in ask/plan mode (see
+        // InitializeControlChannelAsync).
         psi.ArgumentList.Add("--permission-prompt-tool");
         psi.ArgumentList.Add("stdio");
-
-        // Set true once we've added a --settings arg (ask mode writes one with the
-        // hooks block); other modes write a settings-only file afterwards if the
-        // user configured any claude settings.
-        bool settingsWritten = false;
 
         if (_permissionMode == "yolo")
         {
@@ -672,26 +652,21 @@ The user's IDE selection (if any) is included in the conversation context and ma
         }
         else // "ask" / "plan" — one spawn profile, live-switchable via set_permission_mode
         {
-            // When a pipe is available (CLAUDESTUDIO_HOOK_ENABLE=1), wire a PreToolUse
-            // hook pointing back to ourselves so prompts route to the UI. Without a
-            // pipe, claude auto-approves everything in stdio mode (PoC-confirmed).
+            // When the broker is enabled (CLAUDESTUDIO_HOOK_ENABLE=1), a PreToolUse
+            // hook on the control channel routes prompts to the UI. Without it,
+            // claude auto-approves everything in stdio mode (PoC-confirmed).
             // plan gets the same hooks since 2026-07-10: ask↔plan flips reuse the
             // session (same key), so the spawn must carry everything either mode
             // needs. Side effect (deliberate, more conservative than before): plan
             // mode now shows permission modals for matched tools too.
-            if (_pipeName != null)
+            if (_broker != null)
             {
-                var settingsPath = WriteSettings(includeHooks: true)!;
-                psi.ArgumentList.Add("--settings");
-                psi.ArgumentList.Add(settingsPath);
+                registerControlHooks = true;
                 psi.ArgumentList.Add("--include-hook-events");
-                var mcpConfigPath = WriteMcpConfig();
-                if (mcpConfigPath != null)
-                {
-                    psi.ArgumentList.Add("--mcp-config");
-                    psi.ArgumentList.Add(mcpConfigPath);
-                }
-                settingsWritten = true;
+                // In-process MCP server: claude tunnels its JSON-RPC to us as
+                // mcp_message control_requests, nothing is spawned.
+                psi.ArgumentList.Add("--mcp-config");
+                psi.ArgumentList.Add(VsBridgeMcpServer.McpConfigJson);
                 // Claude has an internal permission check for file-modifying tools
                 // (Edit/Write/MultiEdit) that runs BEFORE PreToolUse hooks in stdio
                 // mode. Without acceptEdits, claude blocks these tools with
@@ -705,9 +680,9 @@ The user's IDE selection (if any) is included in the conversation context and ma
                 // covers Edit/Write/MultiEdit; Bash compound commands (`cd X && Y`,
                 // `cd X; Y`) and other "needs approval" cases were still being
                 // auto-denied by claude in stdio mode (no TTY to ask via). With
-                // bypass, claude lets everything through and the hook (configured
-                // via --settings + --include-hook-events) remains the sole
-                // gatekeeper — modal still appears for matched tools.
+                // bypass, claude lets everything through and the hook (registered
+                // in the initialize control_request) remains the sole gatekeeper —
+                // modal still appears for matched tools.
                 psi.ArgumentList.Add("--permission-mode");
                 psi.ArgumentList.Add(_permissionMode == "plan" ? "plan" : "bypassPermissions");
 
@@ -728,20 +703,16 @@ The user's IDE selection (if any) is included in the conversation context and ma
                 psi.ArgumentList.Add("--permission-mode");
                 psi.ArgumentList.Add("plan");
             }
-            // ask without a pipe: no mode arg (claude's default; auto-approves
+            // ask without the broker: no mode arg (claude's default; auto-approves
             // in stdio) — SwitchPermissionModeAsync uses "default" to come back.
         }
 
-        // Apply user-configured claude settings in modes that didn't already write
-        // a settings.json (plan / yolo / ask-without-pipe). No-op if nothing set.
-        if (!settingsWritten)
+        // User-configured claude settings, all modes. No-op if nothing set.
+        var claudeSettingsPath = WriteSettings();
+        if (claudeSettingsPath != null)
         {
-            var claudeSettingsPath = WriteSettings(includeHooks: false);
-            if (claudeSettingsPath != null)
-            {
-                psi.ArgumentList.Add("--settings");
-                psi.ArgumentList.Add(claudeSettingsPath);
-            }
+            psi.ArgumentList.Add("--settings");
+            psi.ArgumentList.Add(claudeSettingsPath);
         }
 
         if (!string.IsNullOrEmpty(_effort))
@@ -913,7 +884,29 @@ The user's IDE selection (if any) is included in the conversation context and ma
         // (no `-p`), claude does not emit any stdout until it receives the first stdin
         // line — waiting for init before sending the first message deadlocks both sides.
         // Instead, init arrives as the first event of the first SendMessageAsync call
-        // and is processed by the same loop as everything else.
+        // and is processed by the same loop as everything else. The initialize
+        // control_request below is such a stdin line; claude answers it at once.
+        if (registerControlHooks)
+            await InitializeControlChannelAsync(sw);
+    }
+
+    // Registers the PreToolUse/PostToolUse hook callbacks. Fail-closed: in ask/plan
+    // mode claude runs under bypassPermissions, so without the PreToolUse hook every
+    // tool would run unprompted — the session is torn down instead.
+    private async Task InitializeControlChannelAsync(Stopwatch sw)
+    {
+        var resp = await SendControlRequestAsync(
+            ControlHooks.BuildInitializeRequest(PermissionBroker.HookTimeoutSeconds), "initialize", quietErrors: true);
+        if (resp != null)
+        {
+            EmitTiming("control channel initialized", sw.ElapsedMilliseconds);
+            return;
+        }
+
+        var stderr = SnapshotStderr().Trim();
+        await DisposeAsync();
+        throw new Exception("claude did not accept the permission hooks (initialize control_request), " +
+                            "so the session was not started" + (stderr.Length > 0 ? $": {stderr}" : "."));
     }
 
     internal readonly record struct PendingAsk(string RequestId, string InputJson);
@@ -964,6 +957,88 @@ The user's IDE selection (if any) is included in the conversation context and ma
             await WriteControlResponseAsync(pending.RequestId,
                 new { behavior = "deny", message = string.IsNullOrEmpty(pr.Reason) ? "User rejected the plan — keep planning." : pr.Reason });
         return true;
+    }
+
+    // Hook callbacks and MCP messages claude sends on the control channel. Every
+    // stdout reader calls this first: claude blocks on each answer, and some
+    // arrive outside a turn (the MCP initialize comes before the answer to our
+    // own initialize). Each is answered on its own task, so a permission modal
+    // waiting for the user never stalls the reader or the other tool calls.
+    private bool TryDispatchControlRequest(JsonElement evt)
+    {
+        if (!evt.TryGetProperty("type", out var tp) || tp.GetString() != "control_request") return false;
+        var requestId = evt.TryGetProperty("request_id", out var rid) ? rid.GetString() : null;
+        if (requestId == null || !evt.TryGetProperty("request", out var req)) return false;
+        var subtype = req.TryGetProperty("subtype", out var st) ? st.GetString() : null;
+
+        Func<Task<JsonObject>> answer;
+        var isPreToolUse = false;
+        if (subtype == "hook_callback")
+        {
+            var call = ControlHooks.ParseHookCallback(req);
+            isPreToolUse = call.CallbackId == ControlHooks.PreToolUseCallbackId;
+            answer = () => AnswerHookCallbackAsync(call);
+        }
+        else if (subtype == "mcp_message")
+        {
+            var server = req.TryGetProperty("server_name", out var sn) ? sn.GetString() : null;
+            var message = req.TryGetProperty("message", out var m) ? JsonNode.Parse(m.GetRawText()) as JsonObject : null;
+            answer = () => AnswerMcpMessageAsync(server, message);
+        }
+        else
+        {
+            return false;
+        }
+
+        _ = Task.Run(async () =>
+        {
+            JsonObject response;
+            try { response = await answer(); }
+            catch (Exception ex)
+            {
+                EmitError($"{subtype} handler failed: {ex.Message}");
+                // A failed PreToolUse check must not let the tool through.
+                response = isPreToolUse
+                    ? ControlHooks.DenyPreToolUse($"Permission denied: {ex.Message}")
+                    : new JsonObject();
+            }
+            try { await WriteControlResponseAsync(requestId, response); }
+            catch { /* session disposed (cancel/shutdown) — claude is going away */ }
+        });
+        return true;
+    }
+
+    private async Task<JsonObject> AnswerHookCallbackAsync(ControlHooks.HookCall call)
+    {
+        if (_broker == null) return ControlHooks.Continue();
+        switch (call.CallbackId)
+        {
+            case ControlHooks.PreToolUseCallbackId:
+                return await _broker.DecidePreToolUseAsync(call);
+            case ControlHooks.PostToolUseCallbackId:
+                // Diagnostics are informational, never blocking.
+                return ControlHooks.PostToolUseContext(await _broker.GetDiagnosticsAsync(call.ToolUseId, call.FilePath));
+            default:
+                return ControlHooks.Continue();
+        }
+    }
+
+    private async Task<JsonObject> AnswerMcpMessageAsync(string? server, JsonObject? message)
+    {
+        JsonObject reply;
+        if (message == null)
+            reply = new JsonObject { ["jsonrpc"] = "2.0", ["id"] = 0, ["result"] = new JsonObject() };
+        else if (server != VsBridgeMcpServer.ServerName || _broker == null)
+            reply = new JsonObject
+            {
+                ["jsonrpc"] = "2.0",
+                ["id"] = message["id"]?.DeepClone() ?? 0,
+                ["error"] = new JsonObject { ["code"] = -32601, ["message"] = $"Unknown MCP server: {server}" }
+            };
+        else
+            reply = await VsBridgeMcpServer.HandleAsync(message, _workingDirectory,
+                spec => _broker.RunBridgeAsync("mcp-" + Guid.NewGuid().ToString("N"), spec));
+        return new JsonObject { ["mcp_response"] = reply };
     }
 
     // Auto-allow an unexpected control_request, echoing the input unchanged.
@@ -1053,6 +1128,8 @@ The user's IDE selection (if any) is included in the conversation context and ma
             JsonElement evt;
             try { evt = JsonSerializer.Deserialize<JsonElement>(line); }
             catch { continue; }
+
+            if (TryDispatchControlRequest(evt)) continue;
 
             // #22a: the type/subtype classification that used to live inline
             // here now lives in ClaudeStudioShared.StreamEventParser, unit
@@ -1192,8 +1269,8 @@ The user's IDE selection (if any) is included in the conversation context and ma
     // request, drains stdout until the matching control_response, and returns
     // the inner response element — or null after emitting an error chunk.
     // Called between turns only (claude idle), so it owns stdout while waiting;
-    // anything else claude emits meanwhile (rate_limit_event, keep-alives) is
-    // skipped.
+    // control requests from claude are dispatched, anything else it emits
+    // meanwhile (rate_limit_event, keep-alives) is skipped.
     // quietErrors: failures go to the timing channel (extension OutputLog) instead
     // of a user-visible error bubble — for requests with a silent fallback, like
     // set_permission_mode (a failed switch just respawns).
@@ -1220,6 +1297,7 @@ The user's IDE selection (if any) is included in the conversation context and ma
             JsonElement evt;
             try { evt = JsonSerializer.Deserialize<JsonElement>(line); }
             catch { continue; }
+            if (TryDispatchControlRequest(evt)) continue;
             if (!evt.TryGetProperty("type", out var tp) || tp.GetString() != "control_response") continue;
             if (!evt.TryGetProperty("response", out var resp)) continue;
             if (!resp.TryGetProperty("request_id", out var rid) || rid.GetString() != requestId) continue;
@@ -1340,109 +1418,6 @@ The user's IDE selection (if any) is included in the conversation context and ma
         catch { }
     }
 
-    private object BuildHooks()
-    {
-        var agentPath = Environment.ProcessPath
-            ?? throw new InvalidOperationException("cannot resolve agent executable path");
-
-        // PoC confirmed: paths in settings.json must use forward slashes — claude's
-        // shell layer interprets backslashes as escape characters and strips them.
-        var agentPathFwd = agentPath.Replace('\\', '/');
-
-        return new
-        {
-            PreToolUse = new[]
-            {
-                new
-                {
-                    // FAIL-CLOSED: gate everything except tools that only read.
-                    //
-                    // The old matcher listed the dangerous tools by name, so every
-                    // tool the CLI added later ran with NO gate at all — in ask/plan
-                    // mode we spawn under bypassPermissions, so a name this regex
-                    // misses is simply allowed and no modal ever appears. That is
-                    // how PowerShell, the default shell tool on Windows since CLI
-                    // 2.1.226, ended up running "git status" unprompted (rodada 17).
-                    //
-                    // Inverting it means a new tool defaults to *asking*, which is
-                    // recoverable (allow for the session, or add a permission rule)
-                    // instead of silent. The exclusions are read-only or
-                    // conversation-local: Read/Glob/Grep/NotebookRead inspect,
-                    // ToolSearch loads a schema, TodoWrite writes the task list,
-                    // BashOutput reads an existing shell's buffer, WebSearch returns
-                    // results (WebFetch, which pulls a URL, is deliberately NOT here).
-                    //
-                    // Negative lookahead verified against CLI 2.1.226 (rodada 17):
-                    // the hook fires for a shell command and does not fire for Read.
-                    // If a future CLI stops honouring it the regex matches nothing
-                    // and NOTHING is gated, so re-run that probe when bumping the CLI.
-                    //
-                    // AskUserQuestion and ExitPlanMode are excluded because they are already
-                    // gated on the control channel — the question card and the "Approve plan?"
-                    // modal. The old name list left them out by omission; inverting the rule
-                    // swept them in, which surfaces as the same plan being approved twice, once
-                    // per gate. Neither executes anything, so this hook has nothing to protect.
-                    matcher = "^(?!Read$|Glob$|Grep$|NotebookRead$|ToolSearch$|TodoWrite$|BashOutput$|WebSearch$|AskUserQuestion$|ExitPlanMode$).*",
-                    hooks = new[]
-                    {
-                        // timeout must outlive the longest the permission modal can wait.
-                        // A PreToolUse hook that hits its own timeout does NOT block the
-                        // tool (measured); under bypassPermissions the tool would then run
-                        // unapproved. The CLI default is 600s, so leaving it unset let a
-                        // wait past ten minutes execute without approval — and the killed
-                        // hook is what produced "pipe is broken" when the server finally
-                        // answered. PermissionPipeServer.HookTimeoutSeconds is kept above
-                        // its own ceiling so the server always denies first.
-                        new
-                        {
-                            type = "command",
-                            command = $"\"{agentPathFwd}\" --hook {_pipeName}",
-                            timeout = PermissionPipeServer.HookTimeoutSeconds
-                        }
-                    }
-                }
-            },
-            // After a file edit, pull the VS Error List for that file and feed
-            // any errors/warnings back to claude as additionalContext so it can
-            // self-correct. Informational only — the hook never blocks.
-            PostToolUse = new[]
-            {
-                new
-                {
-                    matcher = "Edit|Write|MultiEdit|NotebookEdit",
-                    hooks = new[]
-                    {
-                        new { type = "command", command = $"\"{agentPathFwd}\" --hook-post {_pipeName}" }
-                    }
-                }
-            }
-        };
-    }
-
-    // Declares the Visual Studio bridge MCP server (this same exe in --mcp mode).
-    // Written next to settings.json so DisposeAsync removes both; call after
-    // WriteSettings.
-    private string? WriteMcpConfig()
-    {
-        DeleteLegacyMcpConfigs();
-        try
-        {
-            var exe = Environment.ProcessPath;
-            if (string.IsNullOrEmpty(exe) || _settingsTempDir == null) return null;
-            var path = Path.Combine(_settingsTempDir, "mcp.json");
-            var cfg = new Dictionary<string, object>
-            {
-                ["mcpServers"] = new Dictionary<string, object>
-                {
-                    [McpMode.ServerName] = new { command = exe, args = new[] { "--mcp", _pipeName! } }
-                }
-            };
-            File.WriteAllText(path, JsonSerializer.Serialize(cfg));
-            return path;
-        }
-        catch { return null; }
-    }
-
     private static bool _legacyMcpConfigsDeleted;
 
     // Up to 1.1.16 the config went to %TEMP%\ClaudeStudio\mcp-<pid>.json and was
@@ -1479,7 +1454,7 @@ The user's IDE selection (if any) is included in the conversation context and ma
 
         // V6 permission rules — claude enforces these natively (deny always;
         // allow/ask in its own permission flow). The per-turn hook auto-decision
-        // lives in PermissionPipeServer, independent of this block.
+        // lives in PermissionBroker, independent of this block.
         var perms = new Dictionary<string, object>();
         if (_claudeSettings.PermissionAllow is { Count: > 0 } al) perms["allow"] = al;
         if (_claudeSettings.PermissionAsk is { Count: > 0 } ak) perms["ask"] = ak;
@@ -1490,13 +1465,13 @@ The user's IDE selection (if any) is included in the conversation context and ma
         return d;
     }
 
-    // Writes the settings.json passed to claude via --settings. Includes the hooks
-    // block only when requested (ask mode with a pipe), plus any user-configured
-    // claude settings (all modes). Returns null when there's nothing to write.
-    private string? WriteSettings(bool includeHooks)
+    // Writes the settings.json passed to claude via --settings: the user-configured
+    // claude settings. Returns null when there's nothing to write. The hooks are
+    // not in it: they are registered on the control channel.
+    private string? WriteSettings()
     {
+        DeleteLegacyMcpConfigs();
         var settings = BuildClaudeSettings();
-        if (includeHooks) settings["hooks"] = BuildHooks();
         if (settings.Count == 0) return null;
 
         _settingsTempDir = Path.Combine(Path.GetTempPath(), $"claudestudio-{Environment.ProcessId}-{Guid.NewGuid():N}");

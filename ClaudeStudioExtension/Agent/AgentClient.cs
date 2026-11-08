@@ -608,6 +608,13 @@ public class AgentClient
                 continue;
             }
 
+            // Persistent shell commands and results, for the Shell output pane.
+            if (chunk.Type == "shell-log")
+            {
+                ShellLog.Write(chunk.Text);
+                continue;
+            }
+
             // Agent-side notes that belong in the log but never in the chat —
             // e.g. how many permission rules came from claude's settings files.
             if (chunk.Type == "info")

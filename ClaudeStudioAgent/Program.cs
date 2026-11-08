@@ -976,6 +976,8 @@ Every tool call here has a fixed overhead of a few seconds (security hooks run b
                     : $"the shell is not in claude.exe's Sandboxie {SandboxieBox.Describe(claudeBox)}");
             _shellPool.Warm();
             EmitTiming($"persistent shell: {shellBash}", sw.ElapsedMilliseconds);
+            EmitShellLog($"--- [{DateTime.Now:HH:mm:ss}] new session: {shellBash}, cwd {_workingDirectory}; " +
+                         $"claude in {SandboxieBox.Describe(claudeBox)}, agent in {SandboxieBox.Describe(agentBox)}\n");
         }
         if (registerControlHooks || shellBash != null)
             await InitializeControlChannelAsync(sw, registerControlHooks);
@@ -1174,11 +1176,35 @@ Every tool call here has a fixed overhead of a few seconds (security hooks run b
     private async Task<ShellRunResult> RunShellAsync(string command, int timeoutMs)
     {
         var pool = _shellPool ?? throw new InvalidOperationException("the persistent shell is not running");
+        // The Shell output pane: the command when it starts (long commands show up
+        // at once), then what it returned. Parallel calls are told apart by #id.
+        var id = Interlocked.Increment(ref _shellCommandSeq);
+        EmitShellLog($"[{DateTime.Now:HH:mm:ss.fff}] #{id} $ {command.Replace("\n", "\n    ")}");
         var sw = Stopwatch.StartNew();
-        var r = await pool.RunAsync(command, TimeSpan.FromMilliseconds(timeoutMs));
+        PersistentShell.Result r;
+        try
+        {
+            r = await pool.RunAsync(command, TimeSpan.FromMilliseconds(timeoutMs));
+        }
+        catch (Exception ex)
+        {
+            EmitShellLog($"[{DateTime.Now:HH:mm:ss.fff}] #{id} failed: {ex.Message}\n");
+            throw;
+        }
         // Output log only: what the shell itself cost, apart from claude and the hooks.
         EmitTiming("persistent shell command", sw.ElapsedMilliseconds);
+        var status = r.TimedOut ? "timed out, shell restarted" : $"exit {r.ExitCode}" + (r.ShellEnded ? ", shell ended" : "");
+        EmitShellLog((r.Output.Length > 0 ? r.Output + "\n" : "") +
+                     $"[{DateTime.Now:HH:mm:ss.fff}] #{id} {status}, {sw.ElapsedMilliseconds} ms\n");
         return new ShellRunResult { Output = r.Output, ExitCode = r.ExitCode, TimedOut = r.TimedOut, ShellEnded = r.ShellEnded };
+    }
+
+    private int _shellCommandSeq;
+
+    private static void EmitShellLog(string text)
+    {
+        Console.WriteLine(JsonSerializer.Serialize(new ChatChunk { Type = "shell-log", Text = text }));
+        Console.Out.Flush();
     }
 
     // Auto-allow an unexpected control_request, echoing the input unchanged.

@@ -4109,7 +4109,7 @@ public partial class AgentToolWindowControl : UserControl
                 return $"Project '{projectName}' was not found in the open solution.";
         }
 
-        try { dte.ExecuteCommand("View.Output"); } catch { }
+        ShowBuildOutputPane(dte);
 
         var steps = action == "rebuild" ? new[] { "clean", "build" } : new[] { action };
         foreach (var step in steps)
@@ -4131,6 +4131,7 @@ public partial class AgentToolWindowControl : UserControl
                 {
                     CleanProject(uniqueName!);
                 }
+                ShowBuildOutputPane(dte);
                 await done.Task;
             }
             finally { dte.Events.BuildEvents.OnBuildDone -= handler; }
@@ -4151,6 +4152,32 @@ public partial class AgentToolWindowControl : UserControl
         if (errors == 0)
             return $"{verb} of {target} failed in {failed} project(s) but the Error List has no errors; check the VS Output window.";
         return prompt;
+    }
+
+    // Brings up the Output window with the "Build" pane selected, so the user
+    // watches the build in the same place as when pressing Build themselves.
+    private static void ShowBuildOutputPane(EnvDTE.DTE dte)
+    {
+        ThreadHelper.ThrowIfNotOnUIThread();
+        try
+        {
+            dte.ExecuteCommand("View.Output");
+            var window = dte.Windows.Item(EnvDTE.Constants.vsWindowKindOutput);
+            window.Visible = true;
+            var output = (EnvDTE.OutputWindow)window.Object;
+            foreach (EnvDTE.OutputWindowPane pane in output.OutputWindowPanes)
+            {
+                if (pane.Guid.Equals("{1BD8A850-02D1-11D1-BEE7-00A0C913D1F8}", StringComparison.OrdinalIgnoreCase))
+                {
+                    pane.Activate();
+                    return;
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            OutputLog.Warn($"could not select the Build output pane: {ex.Message}");
+        }
     }
 
     private static string? FindProjectUniqueName(EnvDTE.Projects projects, string name)

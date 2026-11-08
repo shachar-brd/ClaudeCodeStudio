@@ -320,7 +320,7 @@ public partial class AgentToolWindowControl
         if (error != null) return error;
         var projects = wholeSolution ? resolved.Where(p => IsTestProject(p.FullPath)).ToList() : resolved;
         if (projects.Count == 0)
-            return "No test projects found in the open solution (looked for Microsoft.NET.Test.Sdk, MSTest.Sdk or IsTestProject).";
+            return "No test projects found in the open solution (looked for Microsoft.NET.Test.Sdk, MSTest.Sdk, IsTestProject or a legacy MSTest project).";
 
         if (spec.Build)
         {
@@ -336,12 +336,18 @@ public partial class AgentToolWindowControl
         }
 
         // Configuration/platform each project actually builds with, so --no-build
-        // finds the binaries VS just produced.
-        var runs = new List<(BridgeProject project, string config, string? platform)>();
+        // finds the binaries VS just produced. Legacy (non-SDK) projects have no
+        // VSTest target, so `dotnet test` silently does nothing for them; those run
+        // the built assembly through the IDE's vstest.console.exe instead.
+        var vstest = FindVsTestConsole(dte);
+        var resultsRoot = Path.Combine(Path.GetTempPath(), "ClaudeStudio", "tests", Guid.NewGuid().ToString("N"));
+        var runs = new List<(BridgeProject project, string tool, List<string> args, string trxName)>();
         foreach (var p in projects)
         {
             string config = "Debug";
             string? platform = null;
+            string? assembly = null;
+            var sdkStyle = IsSdkStyleProject(p.FullPath);
             try
             {
                 var active = p.Project?.ConfigurationManager?.ActiveConfiguration;
@@ -351,10 +357,41 @@ public partial class AgentToolWindowControl
                     var plat = active.PlatformName;
                     if (!string.IsNullOrEmpty(plat) && !plat.Replace(" ", "").Equals("AnyCPU", StringComparison.OrdinalIgnoreCase))
                         platform = plat;
+                    if (!sdkStyle)
+                        assembly = GetOutputAssembly(p, active);
                 }
             }
             catch { }
-            runs.Add((p, config, platform));
+
+            var trxName = SafeFileName(p.Name) + ".trx";
+            if (!sdkStyle)
+            {
+                if (vstest == null)
+                    return $"{p.Name} is a legacy (non-SDK) test project and vstest.console.exe was not found under the Visual Studio installation.";
+                if (assembly == null || !File.Exists(assembly))
+                    return $"Could not find the built test assembly for {p.Name}" + (assembly != null ? $" (expected {assembly})" : "") +
+                           ". Build it first (vs_build) or run vs_test with build=true.";
+                var vsArgs = new List<string>
+                {
+                    assembly, "/logger:trx;LogFileName=" + trxName, "/ResultsDirectory:" + resultsRoot
+                };
+                var vsPlatform = platform?.Replace(" ", "");
+                if (vsPlatform != null && new[] { "x86", "x64", "ARM64" }.Contains(vsPlatform, StringComparer.OrdinalIgnoreCase))
+                    vsArgs.Add("/Platform:" + vsPlatform);
+                if (!string.IsNullOrWhiteSpace(spec.Filter)) vsArgs.Add("/TestCaseFilter:" + spec.Filter);
+                runs.Add((p, vstest, vsArgs, trxName));
+                continue;
+            }
+
+            var args = new List<string>
+            {
+                "test", p.FullPath, "--no-build", "--nologo", "-c", config,
+                "--logger", "trx;LogFileName=" + trxName,
+                "--results-directory", resultsRoot
+            };
+            if (platform != null) args.Add("-p:Platform=" + platform);
+            if (!string.IsNullOrWhiteSpace(spec.Filter)) { args.Add("--filter"); args.Add(spec.Filter!); }
+            runs.Add((p, "dotnet", args, trxName));
         }
 
         var pane = GetTestPane(dte);
@@ -362,27 +399,16 @@ public partial class AgentToolWindowControl
         pane?.OutputStringThreadSafe($"Claude Code Studio: running tests for {string.Join(", ", projects.Select(p => p.Name))}" +
                                      (spec.Filter != null ? $" (filter: {spec.Filter})" : "") + Environment.NewLine);
 
-        var resultsRoot = Path.Combine(Path.GetTempPath(), "ClaudeStudio", "tests", Guid.NewGuid().ToString("N"));
         var sw = Stopwatch.StartNew();
         var outcomes = new List<(string project, int exitCode, string? trx, string tail)>();
         try
         {
             Directory.CreateDirectory(resultsRoot);
-            foreach (var (project, config, platform) in runs)
+            foreach (var (project, tool, args, trxName) in runs)
             {
-                var trxName = SafeFileName(project.Name) + ".trx";
-                var args = new List<string>
-                {
-                    "test", project.FullPath, "--no-build", "--nologo", "-c", config,
-                    "--logger", "trx;LogFileName=" + trxName,
-                    "--results-directory", resultsRoot
-                };
-                if (platform != null) args.Add("-p:Platform=" + platform);
-                if (!string.IsNullOrWhiteSpace(spec.Filter)) { args.Add("--filter"); args.Add(spec.Filter!); }
-
-                pane?.OutputStringThreadSafe($"{Environment.NewLine}> dotnet {string.Join(" ", args.Select(QuoteArg))}{Environment.NewLine}");
+                pane?.OutputStringThreadSafe($"{Environment.NewLine}> {QuoteArg(tool)} {string.Join(" ", args.Select(QuoteArg))}{Environment.NewLine}");
                 var (exit, tail) = await RunProcessToPaneAsync(
-                    "dotnet", args, Path.GetDirectoryName(project.FullPath) ?? resultsRoot, pane, TestRunTimeout);
+                    tool, args, Path.GetDirectoryName(project.FullPath) ?? resultsRoot, pane, TestRunTimeout);
                 var trxPath = Path.Combine(resultsRoot, trxName);
                 outcomes.Add((project.Name, exit, File.Exists(trxPath) ? trxPath : null, tail));
             }
@@ -402,9 +428,55 @@ public partial class AgentToolWindowControl
             var text = File.ReadAllText(projectPath);
             return text.IndexOf("Microsoft.NET.Test.Sdk", StringComparison.OrdinalIgnoreCase) >= 0
                 || text.IndexOf("MSTest.Sdk", StringComparison.OrdinalIgnoreCase) >= 0
-                || text.IndexOf("<IsTestProject>true", StringComparison.OrdinalIgnoreCase) >= 0;
+                || text.IndexOf("<IsTestProject>true", StringComparison.OrdinalIgnoreCase) >= 0
+                // Legacy .NET Framework test projects (MSTest v1 project type / TeamTest).
+                || text.IndexOf("<TestProjectType>UnitTest", StringComparison.OrdinalIgnoreCase) >= 0
+                || text.IndexOf("3AC096D0-A1C2-E12C-1390-A8335801FDAB", StringComparison.OrdinalIgnoreCase) >= 0
+                || text.IndexOf("Microsoft.VisualStudio.QualityTools.UnitTestFramework", StringComparison.OrdinalIgnoreCase) >= 0;
         }
         catch { return false; }
+    }
+
+    private static bool IsSdkStyleProject(string projectPath)
+    {
+        try
+        {
+            var root = XDocument.Load(projectPath).Root;
+            if (root == null) return true;
+            return root.Attribute("Sdk") != null
+                || root.Elements().Any(e => e.Name.LocalName == "Sdk")
+                || root.Elements().Any(e => e.Name.LocalName == "Import" && e.Attribute("Sdk") != null);
+        }
+        catch { return true; }
+    }
+
+    // Full path of the assembly the project's active configuration builds.
+    private static string? GetOutputAssembly(BridgeProject p, EnvDTE.Configuration active)
+    {
+        ThreadHelper.ThrowIfNotOnUIThread();
+        try
+        {
+            var outputPath = active.Properties?.Item("OutputPath")?.Value as string;
+            var fileName = p.Project?.Properties?.Item("OutputFileName")?.Value as string;
+            if (string.IsNullOrEmpty(outputPath) || string.IsNullOrEmpty(fileName)) return null;
+            var dir = Path.GetDirectoryName(p.FullPath) ?? "";
+            return Path.GetFullPath(Path.Combine(dir, outputPath, fileName));
+        }
+        catch { return null; }
+    }
+
+    // vstest.console.exe shipped with the running IDE (Common7\IDE\Extensions\TestPlatform).
+    private static string? FindVsTestConsole(EnvDTE.DTE dte)
+    {
+        ThreadHelper.ThrowIfNotOnUIThread();
+        try
+        {
+            var ideDir = Path.GetDirectoryName(dte.FullName);
+            if (ideDir == null) return null;
+            var path = Path.Combine(ideDir, "Extensions", "TestPlatform", "vstest.console.exe");
+            return File.Exists(path) ? path : null;
+        }
+        catch { return null; }
     }
 
     private static string SummarizeTestRun(
@@ -418,8 +490,9 @@ public partial class AgentToolWindowControl
         {
             if (o.trx == null)
             {
-                if (o.exitCode != 0)
-                    problems.Add($"{o.project}: dotnet test exited with code {o.exitCode} and wrote no results. Last output:\n{o.tail}");
+                problems.Add(o.exitCode != 0
+                    ? $"{o.project}: the test run exited with code {o.exitCode} and wrote no results. Last output:\n{o.tail}"
+                    : $"{o.project}: the test run finished but wrote no results (no test adapter ran for this project?). Last output:\n{o.tail}");
                 continue;
             }
 
@@ -456,7 +529,7 @@ public partial class AgentToolWindowControl
 
             // A non-zero exit with every test passing is a crashed or aborted run.
             if (o.exitCode != 0 && failed == failedBefore && problems.Count == problemsBefore)
-                problems.Add($"{o.project}: dotnet test exited with code {o.exitCode}. Last output:\n{o.tail}");
+                problems.Add($"{o.project}: the test run exited with code {o.exitCode}. Last output:\n{o.tail}");
         }
 
         var counts = $"{passed} passed, {failed} failed, {skipped} skipped, {elapsed.TotalSeconds:F1}s";

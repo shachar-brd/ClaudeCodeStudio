@@ -1,8 +1,10 @@
 # Claude Code Studio
 
-A native **Claude Code** chat client for **Visual Studio 2022** — a WebView2 chat panel driven by a persistent agent process that streams Claude's responses over `stream-json`, with inline permission prompts, native diffs, session history, and a usage dashboard.
+A native **Claude Code** chat client for **Visual Studio 2022 and 2026** — a WebView2 chat panel driven by a persistent agent process that streams Claude's responses over `stream-json`, with inline permission prompts, native diffs, session history, and a usage dashboard.
 
 Unlike terminal-embedding extensions, Claude Code Studio does **not** host a console window. It runs the `claude` CLI as a long-lived subprocess and speaks its streaming JSON protocol directly, so the whole conversation — text, tool calls, diffs, permission requests — is rendered as first-class UI instead of scraped terminal text.
+
+**This fork** adds Visual Studio build and test tools for Claude (`vs_build`, `vs_test`), moves all permission hooks and tools onto the CLI's stdio control channel, and runs shell commands in one persistent Git Bash per session. Together with Claude CLI preloading and a sharp cut in process starts, this makes the extension much faster on locked-down machines (for example inside a Sandboxie box), where every new process is expensive. See [What's new in this fork](#whats-new-in-this-fork).
 
 <!-- Absolute raw URL on purpose: the Visual Studio Marketplace renders this file
      as the extension overview with no repository context, so a relative path
@@ -14,10 +16,12 @@ Unlike terminal-embedding extensions, Claude Code Studio does **not** host a con
 
 ## Requirements
 
-- **Visual Studio 2022** 17.14 or newer (amd64)
+- **Visual Studio 2022** 17.14 or newer, or **Visual Studio 2026** (amd64)
 - **Windows**
 - **[Claude Code CLI](https://docs.claude.com/en/docs/claude-code/setup)** installed and on `PATH` (or configured via the CLI-path setting)
-- A **Claude** subscription (Pro or higher) or API access, signed in through the CLI
+- **[Git for Windows](https://git-scm.com/download/win)** — Claude Code on Windows needs it anyway; the persistent shell uses its Git Bash
+- A **Claude** subscription (Pro or higher), API access, or an enterprise gateway login, signed in through the CLI
+- Optional: **[ripgrep](https://github.com/BurntSushi/ripgrep)** (`winget install BurntSushi.ripgrep.MSVC`) — when an `rg.exe` is found, Claude's Grep/Glob use it instead of re-launching the large `claude.exe` as ripgrep
 
 ## Installation
 
@@ -34,6 +38,37 @@ Unlike terminal-embedding extensions, Claude Code Studio does **not** host a con
 4. Attach context with `@` (files), Ctrl+V (images), or the editor selection button.
 5. When Claude wants to edit or run something, approve it inline (or switch permission mode to suit how hands-on you want to be).
 6. Review edits via the diff chips; browse or resume past work from the session history.
+
+## What's new in this fork
+
+### Visual Studio build & test tools
+Claude gets an in-process MCP server, `claudestudio-vs`, so it builds and tests through the IDE instead of the shell:
+- **`vs_build`** — build, rebuild or clean the solution or specific projects (by name or path, optional configuration). Output appears in the VS **Build** pane; Claude gets success/failure plus the Error List errors and warnings.
+- **`vs_test`** — builds the test projects in VS, then runs them and returns pass/fail counts and the failing tests with messages, parsed from the TRX results. Output appears in a **Claude Code Studio: Tests** pane. SDK-style projects run through `dotnet test`; legacy .NET Framework test projects (MSTest v1) run through the IDE's own `vstest.console.exe`.
+- **Shell builds go to VS** — an approved plain `dotnet build` / `dotnet clean` / `msbuild` command runs in Visual Studio instead of the shell. Anything the parser doesn't fully understand runs in the shell as approved.
+- Both tools go through the normal permission prompt: they run project build targets and test code.
+
+### One control channel, no helper processes
+The permission hooks (`PreToolUse`, the post-edit diagnostics `PostToolUse`) and the MCP server are registered on the CLI's stdio control channel, the protocol the Agent SDKs use. Nothing is started per tool call, and nothing depends on a Windows named pipe. A hook callback that misses its timeout fails closed: the tool does not run.
+
+### Persistent shell (on by default)
+Shell commands run in one long-lived Git Bash per session instead of a new shell per command. The built-in Bash/PowerShell tools are replaced by the `bash` tool of the same MCP server, shown and permission-checked as `Bash`, so `Bash(...)` rules and *Allow for session* work unchanged.
+- `cd` and exported variables persist between commands; stdin is empty, so nothing can hang on a prompt; output is capped like the built-in tool; a timeout or `exit` restarts the shell.
+- Up to three shells run in parallel for parallel tool calls.
+- The login profile runs once; later shells load the cached environment it produced (about 0.5 s instead of 3.5 s in a sandbox), refreshed when Git, a profile file or the environment changes.
+- Every command and its output, exit code and duration appear in a **Claude Code Studio: Shell** Output pane.
+- **Sandbox-aware:** when `claude.exe` runs in a Sandboxie box, the shell is used only if the agent runs in the same box, so the shell is contained like Claude. Otherwise the session falls back to the built-in Bash with a message explaining why.
+
+### Faster sessions
+- **Preload Claude CLI** — start `claude` as soon as you press New chat or open a session from History (or also when the window opens), so its startup happens while you type. The first message then reuses the warm session.
+- **Fewer process starts** — Claude's own git calls skip Git's `cmd\git.exe` launcher, Grep/Glob use a system `rg.exe` when present, and the CLI version check runs once per installed CLI instead of on every session start. In a Sandboxie trace, non-hook process starts for the same session dropped by half.
+- **Smarter post-edit diagnostics** — files Visual Studio doesn't analyze (Markdown, text, files outside the solution) get an immediate answer instead of a fixed wait, and the Error List report sent to Claude after an edit is capped, so files with many old warnings don't flood the context.
+- **Fewer tool calls** — Claude is asked to chain related shell commands and make independent calls in parallel, since every tool call carries a fixed overhead.
+
+### Also new
+- **Gateway sign-in** — detects an enterprise gateway login (`forceLoginMethod: gateway`) as signed in; only the gateway host is ever read, never token values.
+- **Auto-resume after an agent restart** — if the agent process dies mid-chat, the next message resumes the same session instead of starting an empty one.
+- **Compact chat UI** — full-width replies, a smaller header and bubbles, the model picker inside the composer, and an info menu for account and project.
 
 ## Features
 
@@ -82,11 +117,12 @@ A single palette gathers on-demand tools that render as inline cards:
 ### Workspace, trust & sign-in
 - **Working-directory cascade** — resolves the cwd from the open Solution → Open Folder → active document → user profile, shown in a click-to-copy path bar.
 - **Trust management** — workspace and MCP-server trust gates with a management UI, backed by a trusted-workspaces store and a file-system watcher.
-- **Integrated sign-in** — `claude login` runs from inside the extension with a watcher and an overlay, and the titlebar shows your account name and plan.
+- **Integrated sign-in** — `claude login` runs from inside the extension with a watcher and an overlay, and the titlebar shows your account name and plan. Enterprise gateway logins are recognized too.
 
 ### Configuration
 - **Settings panel** — a searchable settings UI (search matches label, tooltip, and section) that passes through the full Claude Code settings surface, with info tooltips on individual controls.
-- **Model picker** — Sonnet 5 / Sonnet 4.6, Opus 5, Opus 4.8, Opus Plan, Fable 5, Haiku 4.5, plus an effort level (low → max; "max" is session-only).
+- **Model picker** — Sonnet 5 / Sonnet 4.6, Opus 5.5, Opus 5, Opus 4.8, Opus Plan, Fable 5.1, Fable 5, Haiku 4.5, plus an effort level (low → max; "max" is session-only).
+- **Persistent shell & Preload Claude CLI** — on/off for the persistent shell, and Never / On session change / Always for preloading (see [What's new in this fork](#whats-new-in-this-fork)).
 - **Fallback model** — an optional `--fallback-model` used when the primary model is overloaded, with a divider marking when it engages.
 - **Configurable CLI path** — point at a specific `claude` executable, or let detection pick it (it prefers `~/.local/bin/claude.exe` — the native installer's target — over a possibly-stale copy on `PATH`, and warns when the two diverge).
 - **Status line** — an optional configurable status command rendered under the path bar.
@@ -97,20 +133,23 @@ A single palette gathers on-demand tools that render as inline cards:
 ```
 Visual Studio (VSIX, .NET Framework)
         │  WebView2  ⇄  HTML/CSS/JS chat UI
-        │
+        │  builds, tests, Error List, Output panes
         ▼
 ClaudeStudioAgent (subprocess, .NET 10)
-        │  stdin/stdout: stream-json
+        │  stdin/stdout: stream-json + control channel
+        │    (hook callbacks, claudestudio-vs MCP server)
+        ├──────────────► persistent Git Bash (one per session, pooled)
         ▼
    claude  (Claude Code CLI)
 ```
 
-The extension hosts the chat UI in WebView2 and launches `ClaudeStudioAgent` as a persistent subprocess. The agent spawns and talks to the `claude` CLI in streaming JSON mode, translating its event stream into chat chunks and relaying permission requests back through a `PreToolUse` hook. Pure, testable logic (event parsing, pricing, session-ordinal mapping, CLI discovery) lives in `ClaudeStudioShared` and is covered by the `ClaudeStudioTests` xUnit suite.
+The extension hosts the chat UI in WebView2 and launches `ClaudeStudioAgent` as a persistent subprocess. The agent spawns and talks to the `claude` CLI in streaming JSON mode, translating its event stream into chat chunks. On the same stdin/stdout it answers the CLI's control requests: `PreToolUse`/`PostToolUse` hook callbacks (permission modal, rules, post-edit diagnostics) and the in-process `claudestudio-vs` MCP server (`vs_build`, `vs_test`, `bash`). Build and test requests go to the extension, which runs them in Visual Studio; shell commands go to the agent's persistent Git Bash. Pure, testable logic (event parsing, pricing, session-ordinal mapping, CLI discovery, build-command parsing, the control-channel hooks and MCP server) lives in `ClaudeStudioShared` and is covered by the `ClaudeStudioTests` xUnit suite, together with the persistent shell (against a real Git Bash).
 
 ## Building & testing
 
 - **Solution:** `ClaudeStudio.slnx` (extension, agent, shared library, tests).
-- **Run the tests:** `dotnet test ClaudeStudioTests/ClaudeStudioTests.csproj` (xUnit; covers the shared parsing/pricing/ordinal logic).
+- **Run the tests:** `dotnet test ClaudeStudioTests/ClaudeStudioTests.csproj`, or from a Claude session in Visual Studio through the `vs_test` tool (xUnit; covers the shared logic, the control channel and the persistent shell, which needs Git for Windows).
+- **Version:** `Directory.Build.props` sets `Version`, which is stamped into the VSIX manifest; bump it so the VSIX installer accepts an upgrade without uninstalling.
 
 ## License
 
@@ -121,5 +160,7 @@ Released under the [MIT License](LICENSE.txt) — free to use for personal, educ
 *"Claude" is a trademark of Anthropic. This is an independent, unofficial extension and is not affiliated with or endorsed by Anthropic.*
 
 ## Acknowledgments
+
+This is a fork of [**Claude Code Studio**](https://github.com/wluisdev/ClaudeCodeStudio) by **Washington Luis (wluisdev)**, which provides the whole chat client this fork builds on. Thanks, Washington.
 
 Claude Code Studio was inspired by [**ClaudeCodeExtension**](https://github.com/dliedke/ClaudeCodeExtension) by **Daniel Carvalho (dliedke)** — several UX ideas here (session rename/view, the `@` file picker, the build-errors-to-agent flow) were adopted from that project, which is likewise MIT-licensed. It takes a different architectural path — an embedded terminal supporting many agents — and is well worth checking out. Thanks, Daniel.

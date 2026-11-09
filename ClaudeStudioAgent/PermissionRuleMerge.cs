@@ -108,6 +108,13 @@ internal static class PermissionRuleMerge
             deny.AddRange(d);
         }
 
+        // The organization's managed settings (and their drop-in folder) carry full
+        // authority, as in a terminal claude: their deny and ask rules must bind here
+        // too, and their allow rules (e.g. an MCP server IT approves) are IT speaking,
+        // not a repository.
+        foreach (var managed in ManagedSettingsFiles())
+            Absorb(managed, mayAllow: true);
+
         Absorb(ClaudeConfig.UserSettingsPath, mayAllow: true);
 
         if (!string.IsNullOrWhiteSpace(workingDirectory))
@@ -139,6 +146,23 @@ internal static class PermissionRuleMerge
         }
 
         return merged;
+    }
+
+    // %ProgramFiles%\ClaudeCode\managed-settings.json, then the managed-settings.d
+    // drop-ins in name order (where Windows deployments put Claude Code policy).
+    private static IEnumerable<string> ManagedSettingsFiles()
+    {
+        var dir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "ClaudeCode");
+        yield return Path.Combine(dir, "managed-settings.json");
+        string[] dropIns;
+        try
+        {
+            var d = Path.Combine(dir, "managed-settings.d");
+            dropIns = Directory.Exists(d) ? Directory.GetFiles(d, "*.json") : [];
+        }
+        catch { dropIns = []; }
+        foreach (var f in dropIns.OrderBy(f => f, StringComparer.OrdinalIgnoreCase))
+            yield return f;
     }
 
     private static void Info(string text) => Emit("info", text);

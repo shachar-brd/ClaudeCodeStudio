@@ -36,13 +36,21 @@ public class SessionUsage
 // interpreting its lines.
 public static class UsageParser
 {
-    public static SessionUsage? ParseLines(IEnumerable<string> lines)
+    // An API response is written as one line per content block (thinking, text,
+    // each tool_use), every one repeating the response's whole usage; a forked or
+    // resumed session's file starts with the parent's lines again. So a response
+    // counts once, by message.id + requestId: counted holds the keys already
+    // counted, shared across a reader's files so a copy in a later file adds
+    // nothing. Lines without a message id are counted as they come.
+    public static SessionUsage? ParseLines(IEnumerable<string> lines, ISet<string>? counted = null)
     {
+        counted ??= new HashSet<string>(StringComparer.Ordinal);
         string? sessionId = null;
         string? cwd = null;
         string model = "claude-sonnet-5";
         DateTime first = DateTime.MaxValue, last = DateTime.MinValue;
         long inp = 0, outp = 0, cr = 0, cc = 0, cc5m = 0, cc1h = 0;
+        decimal cost = 0;
         int turns = 0;
         string nativeCustom = "", nativeAi = "", preview = "";
 
@@ -119,25 +127,37 @@ public static class UsageParser
 
             if (!msg.TryGetProperty("usage", out var usage)) continue;
 
+            if (msg.TryGetProperty("id", out var idEl) && idEl.ValueKind == JsonValueKind.String)
+            {
+                var requestId = el.TryGetProperty("requestId", out var rqEl) && rqEl.ValueKind == JsonValueKind.String
+                    ? rqEl.GetString() : "";
+                if (!counted.Add(idEl.GetString() + ":" + requestId)) continue;
+            }
+
             turns++;
-            inp  += usage.TryGetProperty("input_tokens",                 out var x1) ? x1.GetInt64() : 0;
-            outp += usage.TryGetProperty("output_tokens",                out var x2) ? x2.GetInt64() : 0;
-            cr   += usage.TryGetProperty("cache_read_input_tokens",      out var x3) ? x3.GetInt64() : 0;
+            var inTurn  = usage.TryGetProperty("input_tokens",            out var x1) ? x1.GetInt64() : 0;
+            var outTurn = usage.TryGetProperty("output_tokens",           out var x2) ? x2.GetInt64() : 0;
+            var crTurn  = usage.TryGetProperty("cache_read_input_tokens", out var x3) ? x3.GetInt64() : 0;
             var ccTurn = usage.TryGetProperty("cache_creation_input_tokens", out var x4) ? x4.GetInt64() : 0;
-            cc += ccTurn;
 
             // Split by TTL for pricing (#4 — 1h writes cost 2x, not 1.25x).
             // Older entries lack the nested breakdown; treat those as 5m,
             // matching the flat rate this code charged before the split.
+            long cc5mTurn, cc1hTurn;
             if (usage.TryGetProperty("cache_creation", out var ccObj) && ccObj.ValueKind == JsonValueKind.Object)
             {
-                cc5m += ccObj.TryGetProperty("ephemeral_5m_input_tokens", out var e5) ? e5.GetInt64() : 0;
-                cc1h += ccObj.TryGetProperty("ephemeral_1h_input_tokens", out var e1h) ? e1h.GetInt64() : 0;
+                cc5mTurn = ccObj.TryGetProperty("ephemeral_5m_input_tokens", out var e5) ? e5.GetInt64() : 0;
+                cc1hTurn = ccObj.TryGetProperty("ephemeral_1h_input_tokens", out var e1h) ? e1h.GetInt64() : 0;
             }
             else
             {
-                cc5m += ccTurn;
+                cc5mTurn = ccTurn;
+                cc1hTurn = 0;
             }
+
+            inp += inTurn; outp += outTurn; cr += crTurn; cc += ccTurn; cc5m += cc5mTurn; cc1h += cc1hTurn;
+            // Each response at its own model: a session can switch models.
+            cost += Pricing.Calculate(model, inTurn, outTurn, crTurn, cc5mTurn, cc1hTurn);
         }
 
         if (sessionId == null || turns == 0) return null;
@@ -156,7 +176,7 @@ public static class UsageParser
             Cache5mTokens = cc5m,
             Cache1hTokens = cc1h,
             TurnCount = turns,
-            Cost = Pricing.Calculate(model, inp, outp, cr, cc5m, cc1h),
+            Cost = cost,
             NativeCustomTitle = nativeCustom,
             NativeAiTitle = nativeAi,
             Preview = preview,

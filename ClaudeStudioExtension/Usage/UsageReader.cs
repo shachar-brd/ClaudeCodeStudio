@@ -16,17 +16,21 @@ public static class UsageReader
         if (!Directory.Exists(root)) return new();
 
         var result = new List<SessionUsage>();
-        foreach (var projDir in Directory.EnumerateDirectories(root))
+        // Each API response counts once across all files (see UsageParser):
+        // oldest file first, so a fork's copy of its parent's history leaves
+        // the cost with the parent session.
+        var counted = new HashSet<string>(StringComparer.Ordinal);
+        var files = Directory.EnumerateDirectories(root)
+            .SelectMany(projDir => Directory.EnumerateFiles(projDir, "*.jsonl"))
+            .OrderBy(f => { try { return File.GetCreationTimeUtc(f); } catch { return DateTime.MaxValue; } });
+        foreach (var jsonl in files)
         {
-            foreach (var jsonl in Directory.EnumerateFiles(projDir, "*.jsonl"))
+            try
             {
-                try
-                {
-                    var session = ParseFile(jsonl);
-                    if (session != null) result.Add(session);
-                }
-                catch { /* skip malformed */ }
+                var session = ParseFile(jsonl, counted);
+                if (session != null) result.Add(session);
             }
+            catch { /* skip malformed */ }
         }
         return result.OrderByDescending(s => s.LastTimestamp).ToList();
     }
@@ -34,7 +38,8 @@ public static class UsageReader
     // #22a: line-parsing logic lives in ClaudeStudioShared.UsageParser now,
     // unit-tested there. FileShare.ReadWrite is deliberate — the CLI may
     // still be actively writing to this transcript while we read it.
-    private static SessionUsage? ParseFile(string path) => UsageParser.ParseLines(ReadLinesShared(path));
+    private static SessionUsage? ParseFile(string path, ISet<string> counted) =>
+        UsageParser.ParseLines(ReadLinesShared(path), counted);
 
     private static IEnumerable<string> ReadLinesShared(string path)
     {

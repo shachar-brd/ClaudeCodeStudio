@@ -346,5 +346,57 @@ public class UsageParserTests
         Assert.Equal(0.6m, result!.Cost);
     }
 
+    // One API response, written as a line per content block, each with the whole usage.
+    private static string Block(string id, string request, string model = "claude-sonnet-5", int input = 1_000_000) =>
+        "{\"type\":\"assistant\",\"requestId\":\"" + request + "\",\"message\":{\"id\":\"" + id +
+        "\",\"model\":\"" + model + "\",\"usage\":{\"input_tokens\":" + input + "}}}";
+
+    [Fact]
+    public void ParseLines_counts_a_response_once_however_many_blocks_it_was_written_as()
+    {
+        var lines = new[]
+        {
+            """{"sessionId":"s1"}""",
+            Block("msg_1", "req_1"), Block("msg_1", "req_1"), Block("msg_1", "req_1"),
+            Block("msg_2", "req_2"),
+        };
+
+        var result = UsageParser.ParseLines(lines);
+
+        Assert.Equal(2, result!.TurnCount);
+        Assert.Equal(2_000_000, result.InputTokens);
+        Assert.Equal(6m, result.Cost);
+    }
+
+    [Fact]
+    public void ParseLines_leaves_a_forks_copy_of_its_parents_history_to_the_parent()
+    {
+        var counted = new System.Collections.Generic.HashSet<string>();
+        var parent = UsageParser.ParseLines(new[] { """{"sessionId":"p"}""", Block("msg_1", "req_1") }, counted);
+        var fork = UsageParser.ParseLines(new[] { """{"sessionId":"f"}""", Block("msg_1", "req_1"), Block("msg_9", "req_9") }, counted);
+        var copyOnly = UsageParser.ParseLines(new[] { """{"sessionId":"c"}""", Block("msg_1", "req_1") }, counted);
+
+        Assert.Equal(3m, parent!.Cost);
+        Assert.Equal(1, fork!.TurnCount);
+        Assert.Equal(3m, fork.Cost);
+        Assert.Null(copyOnly); // nothing of its own
+    }
+
+    [Fact]
+    public void ParseLines_prices_each_response_at_its_own_model()
+    {
+        var lines = new[]
+        {
+            """{"sessionId":"s1"}""",
+            Block("msg_1", "req_1", "claude-opus-5-5"),  // $4 per 1M input
+            Block("msg_2", "req_2", "claude-haiku-4-5"), // $1 per 1M input
+        };
+
+        var result = UsageParser.ParseLines(lines);
+
+        Assert.Equal(5m, result!.Cost);
+        Assert.Equal("claude-haiku-4-5", result.Model);
+    }
+
     private static string JsonQuote(string s) => System.Text.Json.JsonSerializer.Serialize(s);
 }

@@ -65,7 +65,14 @@ Shell commands run in one long-lived Git Bash per session instead of a new shell
 - **Smarter post-edit diagnostics** — files Visual Studio doesn't analyze (Markdown, text, files outside the solution) get an immediate answer instead of a fixed wait, and the Error List report sent to Claude after an edit is capped, so files with many old warnings don't flood the context.
 - **Fewer tool calls** — Claude is asked to chain related shell commands and make independent calls in parallel, since every tool call carries a fixed overhead.
 
+### Background agents and steering
+- **Background agents report back** — agents Claude starts with `run_in_background` keep working after its turn, and when they finish Claude continues on its own. That turn now appears in the chat as a new answer, and the agents' tool calls and permission prompts are handled while the chat is idle, so nothing waits forever.
+- **See them working** — a line above the composer lists each running background agent with its latest step, tool count and running time, and the agent's card in the chat keeps getting its steps, also while the chat is idle.
+- **Steer a running turn** — press Enter while Claude works and the message goes into that turn: Claude takes it at its next step (after the tool call running now), so you can correct its course without stopping it. Text only; ■ still stops the turn.
+
 ### Also new
+- **Accurate Usage costs** — each API response is counted once (the CLI writes one response on several transcript lines, and forked sessions copy history) and priced at the model that produced it.
+- **Managed settings in the permission broker** — `%ProgramFiles%\ClaudeCode\managed-settings.json` and `managed-settings.d\*.json` apply to the extension's permission checks with full authority, as in a terminal `claude`.
 - **Gateway sign-in** — detects an enterprise gateway login (`forceLoginMethod: gateway`) as signed in; only the gateway host is ever read, never token values.
 - **Auto-resume after an agent restart** — if the agent process dies mid-chat, the next message resumes the same session instead of starting an empty one.
 - **Compact chat UI** — full-width replies, a smaller header and bubbles, the model picker inside the composer, and an info menu for account and project.

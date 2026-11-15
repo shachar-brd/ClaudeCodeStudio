@@ -2,6 +2,21 @@
 
 All notable changes to Claude Code Studio are documented here. Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.1.26] - 2026-11-15
+
+### Added
+
+- **Background agents report back in the chat.** When Claude starts agents with `run_in_background`, the CLI continues on its own once they finish, and the agents call tools (and ask for permission) after Claude's turn has ended. The extension used to stop reading between turns, so those calls hung and the follow-up never appeared. The agent now reads the CLI's output for the whole session: tool calls and permission prompts are handled while the chat is idle, and Claude's own follow-up turn appears as a new answer with a short note.
+- **A live line for running background agents.** Above the composer, each running background agent is listed with its latest step, its tool count and how long it has run, until the CLI reports none left. The agent's card in the chat keeps getting its steps too, also while the chat is idle.
+- **Steer a running turn.** Enter while Claude works no longer does nothing: the message goes to the running turn, and Claude takes it at its next step, after the tool call running now, so a turn heading the wrong way can be corrected without stopping it. The message shows with a dashed border, and its ✓ appears when Claude takes it. A message that arrives after the turn ended starts the next one. Text only: attachments and slash commands wait for the turn's end.
+
+### Fixed
+
+- **The Usage window overstated costs several times over.** The CLI writes one API response as several transcript lines with the same usage, and forked or resumed sessions copy earlier lines, so the same response was counted again and again. Each response is now counted once across all transcripts, and priced at the model that produced it instead of the session's last model.
+- **Organization managed settings were ignored by the extension's permission checks.** Ask and plan sessions are gated by the extension's own permission broker, which merged only the extension's rules and the user and project settings. `%ProgramFiles%\ClaudeCode\managed-settings.json` and the `managed-settings.d` drop-ins are now merged too, with full authority, as in a terminal `claude`.
+- **Claude did not start in a hardened sandbox without a system ripgrep.** A missing `USE_BUILTIN_RIPGREP` key in the environment threw at session start. The agent now also looks for `rg.exe` in `~\.local\bin`, and skips an `rg.exe` symlink whose target can't be reached.
+- **Sign-in from a sandbox.** The sign-in screen now explains that a browser opened inside a sandbox can't reach the sign-in page, and to open the link in a normal browser instead.
+
 ## [1.1.7] - 2026-09-25
 
 ### Added

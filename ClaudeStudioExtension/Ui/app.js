@@ -2769,6 +2769,21 @@ window.chrome.webview.addEventListener("message", event => {
         return;
     }
 
+    // A turn claude started by itself (background agents finished): a new
+    // answer with no message of the user's, ended by stream-done as any turn.
+    if (event.data.type === "background-turn") {
+        if (currentStreamBubble) {
+            finalizeBubbleStream(currentStreamBubble);
+            currentStreamBubble = null;
+        }
+        appendSystemInfo("Claude continues on its own (background agents reported back).");
+        if (!isStreaming) {
+            setStreaming(true);
+            addLoading();
+        }
+        return;
+    }
+
     if (event.data.type === "permission_request") {
         queuePermissionRequest(event.data.tool || "", event.data.input || "", event.data.id || "", event.data.cwd || "");
         return;

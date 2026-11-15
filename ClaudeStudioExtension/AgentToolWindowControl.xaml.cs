@@ -1857,78 +1857,37 @@ public partial class AgentToolWindowControl : UserControl
 
             var dispatcher = System.Windows.Application.Current.Dispatcher;
 
+            var turn = BuildTurnCallbacks(dispatcher);
+            // A turn claude starts by itself later (background agents finishing)
+            // renders like this one, as a new answer.
+            var background = BuildTurnCallbacks(dispatcher);
+            background.OnBackgroundStart = () => dispatcher.Invoke(() =>
+            {
+                VsStatusBar.ShowThinking();
+                Browser.CoreWebView2.PostWebMessageAsJson(JsonSerializer.Serialize(new { type = "background-turn" }));
+            });
+            background.OnBackgroundEnd = () => dispatcher.Invoke(() =>
+            {
+                VsStatusBar.Clear();
+                Browser.CoreWebView2.PostWebMessageAsJson(JsonSerializer.Serialize(new { type = "stream-done" }));
+                Usage.UsageToolWindowControl.RefreshIfOpen();
+            });
+            _agentClient.BackgroundCallbacks = background;
+            _agentClient.BackgroundWorkingDirectory = workingDir;
+
             await _agentClient.AskStreamingAsync(request.Text + ideSelection, request.Model, request.Effort, request.PermissionMode,
-                chunk => dispatcher.Invoke(() =>
-                {
-                    const string notFound = "CLAUDE_NOT_FOUND::";
-                    const string budgetExceeded = "BUDGET_EXCEEDED::";
-                    const string authRequired = "AUTH_REQUIRED::";
-                    const string contextFull = "CONTEXT_FULL::";
-                    const string creditsRequired = "CREDITS_REQUIRED::";
-                    if (chunk != null && chunk.StartsWith(notFound, StringComparison.Ordinal))
-                        Browser.CoreWebView2.PostWebMessageAsJson(
-                            JsonSerializer.Serialize(new { type = "claude-not-found", detail = chunk.Substring(notFound.Length) }));
-                    else if (chunk != null && chunk.StartsWith(budgetExceeded, StringComparison.Ordinal))
-                        Browser.CoreWebView2.PostWebMessageAsJson(
-                            JsonSerializer.Serialize(new { type = "budget-exceeded", detail = chunk.Substring(budgetExceeded.Length) }));
-                    // Session died mid-flight: reuse the very card the pre-flight check
-                    // shows, with the CLI's own wording attached so the user sees why.
-                    else if (chunk != null && chunk.StartsWith(authRequired, StringComparison.Ordinal))
-                        Browser.CoreWebView2.PostWebMessageAsJson(
-                            JsonSerializer.Serialize(new { type = "auth-required", detail = chunk.Substring(authRequired.Length) }));
-                    // Context window full: the session can't be resumed any more, so
-                    // route it to the "start a new session" card instead of a bubble.
-                    else if (chunk != null && chunk.StartsWith(contextFull, StringComparison.Ordinal))
-                        Browser.CoreWebView2.PostWebMessageAsJson(
-                            JsonSerializer.Serialize(new { type = "context-full", detail = chunk.Substring(contextFull.Length) }));
-                    // Model needs paid usage credits: route to the "choose another
-                    // model" card instead of a raw bubble (session stays alive).
-                    else if (chunk != null && chunk.StartsWith(creditsRequired, StringComparison.Ordinal))
-                        Browser.CoreWebView2.PostWebMessageAsJson(
-                            JsonSerializer.Serialize(new { type = "credits-required", detail = chunk.Substring(creditsRequired.Length) }));
-                    else
-                        Browser.CoreWebView2.PostWebMessageAsJson(
-                            JsonSerializer.Serialize(new { type = "chunk", text = chunk }));
-                }),
-                timing => dispatcher.Invoke(() =>
-                    Browser.CoreWebView2.PostWebMessageAsJson(
-                        JsonSerializer.Serialize(new { type = "timing", text = timing }))),
-                tokens => dispatcher.Invoke(() =>
-                    Browser.CoreWebView2.PostWebMessageAsJson(
-                        JsonSerializer.Serialize(new { type = "tokens", text = tokens }))),
+                turn.OnChunk, turn.OnTiming, turn.OnTokens,
                 workingDirectory: workingDir,
                 autoResume: request.AutoResume,
-                onSession: sid => dispatcher.Invoke(() =>
-                    Browser.CoreWebView2.PostWebMessageAsJson(
-                        JsonSerializer.Serialize(new { type = "session-info", sessionId = sid, resumed = _agentClient.LastTurnResumed }))),
-                onTool: (kind, name, input, text, id) => dispatcher.Invoke(() =>
-                    Browser.CoreWebView2.PostWebMessageAsJson(
-                        JsonSerializer.Serialize(new { type = kind, name, input, text, id }))),
-                onThinking: status => dispatcher.Invoke(() =>
-                    Browser.CoreWebView2.PostWebMessageAsJson(
-                        JsonSerializer.Serialize(new { type = "thinking-status", status }))),
-                onPermissionRequest: (tool, input, id, cwd) => dispatcher.Invoke(() =>
-                    Browser.CoreWebView2.PostWebMessageAsJson(
-                        JsonSerializer.Serialize(new { type = "permission_request", tool, input, id, cwd }))),
-                onPermissionResolved: (id, reason) => dispatcher.Invoke(() =>
-                    Browser.CoreWebView2.PostWebMessageAsJson(
-                        JsonSerializer.Serialize(new { type = "permission_resolved", id, reason }))),
-                onDiagnosticsRequest: (filePath, requestId) => _ = HandleDiagnosticsRequestAsync(filePath, requestId),
+                onSession: turn.OnSession,
+                onTool: turn.OnTool,
+                onThinking: turn.OnThinking,
+                onPermissionRequest: turn.OnPermissionRequest,
+                onPermissionResolved: turn.OnPermissionResolved,
+                onDiagnosticsRequest: turn.OnDiagnosticsRequest,
                 maxBudgetUsd: request.MaxBudgetUsd,
                 fallbackModel: string.IsNullOrWhiteSpace(request.FallbackModel) ? null : request.FallbackModel.Trim(),
-                onSubagentEvent: sc => dispatcher.Invoke(() =>
-                    Browser.CoreWebView2.PostWebMessageAsJson(
-                        JsonSerializer.Serialize(new
-                        {
-                            type = sc.Type,
-                            text = sc.Text,
-                            tool = sc.Tool,
-                            input = sc.ToolInput,
-                            id = sc.ToolId,
-                            parentId = sc.ParentToolId,
-                            subagentType = sc.SubagentType,
-                            taskDescription = sc.TaskDescription
-                        }))));
+                onSubagentEvent: turn.OnSubagentEvent);
 
             VsStatusBar.Clear();
 
@@ -1998,6 +1957,79 @@ public partial class AgentToolWindowControl : UserControl
             ".exe", ".dll", ".bin", ".dat", ".pdb",
             ".mp3", ".mp4", ".wav", ".avi", ".mov"
         };
+
+    // How the chat shows a turn's chunks: a turn the user sent, and a turn claude
+    // starts by itself (background agents finishing), which renders the same.
+    private Agent.TurnCallbacks BuildTurnCallbacks(System.Windows.Threading.Dispatcher dispatcher) => new()
+    {
+        OnChunk = chunk => dispatcher.Invoke(() =>
+        {
+            const string notFound = "CLAUDE_NOT_FOUND::";
+            const string budgetExceeded = "BUDGET_EXCEEDED::";
+            const string authRequired = "AUTH_REQUIRED::";
+            const string contextFull = "CONTEXT_FULL::";
+            const string creditsRequired = "CREDITS_REQUIRED::";
+            if (chunk != null && chunk.StartsWith(notFound, StringComparison.Ordinal))
+                Browser.CoreWebView2.PostWebMessageAsJson(
+                    JsonSerializer.Serialize(new { type = "claude-not-found", detail = chunk.Substring(notFound.Length) }));
+            else if (chunk != null && chunk.StartsWith(budgetExceeded, StringComparison.Ordinal))
+                Browser.CoreWebView2.PostWebMessageAsJson(
+                    JsonSerializer.Serialize(new { type = "budget-exceeded", detail = chunk.Substring(budgetExceeded.Length) }));
+            // Session died mid-flight: reuse the very card the pre-flight check
+            // shows, with the CLI's own wording attached so the user sees why.
+            else if (chunk != null && chunk.StartsWith(authRequired, StringComparison.Ordinal))
+                Browser.CoreWebView2.PostWebMessageAsJson(
+                    JsonSerializer.Serialize(new { type = "auth-required", detail = chunk.Substring(authRequired.Length) }));
+            // Context window full: the session can't be resumed any more, so
+            // route it to the "start a new session" card instead of a bubble.
+            else if (chunk != null && chunk.StartsWith(contextFull, StringComparison.Ordinal))
+                Browser.CoreWebView2.PostWebMessageAsJson(
+                    JsonSerializer.Serialize(new { type = "context-full", detail = chunk.Substring(contextFull.Length) }));
+            // Model needs paid usage credits: route to the "choose another
+            // model" card instead of a raw bubble (session stays alive).
+            else if (chunk != null && chunk.StartsWith(creditsRequired, StringComparison.Ordinal))
+                Browser.CoreWebView2.PostWebMessageAsJson(
+                    JsonSerializer.Serialize(new { type = "credits-required", detail = chunk.Substring(creditsRequired.Length) }));
+            else
+                Browser.CoreWebView2.PostWebMessageAsJson(
+                    JsonSerializer.Serialize(new { type = "chunk", text = chunk }));
+        }),
+        OnTiming = timing => dispatcher.Invoke(() =>
+            Browser.CoreWebView2.PostWebMessageAsJson(
+                JsonSerializer.Serialize(new { type = "timing", text = timing }))),
+        OnTokens = tokens => dispatcher.Invoke(() =>
+            Browser.CoreWebView2.PostWebMessageAsJson(
+                JsonSerializer.Serialize(new { type = "tokens", text = tokens }))),
+        OnSession = sid => dispatcher.Invoke(() =>
+            Browser.CoreWebView2.PostWebMessageAsJson(
+                JsonSerializer.Serialize(new { type = "session-info", sessionId = sid, resumed = _agentClient.LastTurnResumed }))),
+        OnTool = (kind, name, input, text, id) => dispatcher.Invoke(() =>
+            Browser.CoreWebView2.PostWebMessageAsJson(
+                JsonSerializer.Serialize(new { type = kind, name, input, text, id }))),
+        OnThinking = status => dispatcher.Invoke(() =>
+            Browser.CoreWebView2.PostWebMessageAsJson(
+                JsonSerializer.Serialize(new { type = "thinking-status", status }))),
+        OnPermissionRequest = (tool, input, id, cwd) => dispatcher.Invoke(() =>
+            Browser.CoreWebView2.PostWebMessageAsJson(
+                JsonSerializer.Serialize(new { type = "permission_request", tool, input, id, cwd }))),
+        OnPermissionResolved = (id, reason) => dispatcher.Invoke(() =>
+            Browser.CoreWebView2.PostWebMessageAsJson(
+                JsonSerializer.Serialize(new { type = "permission_resolved", id, reason }))),
+        OnDiagnosticsRequest = (filePath, requestId) => _ = HandleDiagnosticsRequestAsync(filePath, requestId),
+        OnSubagentEvent = sc => dispatcher.Invoke(() =>
+            Browser.CoreWebView2.PostWebMessageAsJson(
+                JsonSerializer.Serialize(new
+                {
+                    type = sc.Type,
+                    text = sc.Text,
+                    tool = sc.Tool,
+                    input = sc.ToolInput,
+                    id = sc.ToolId,
+                    parentId = sc.ParentToolId,
+                    subagentType = sc.SubagentType,
+                    taskDescription = sc.TaskDescription
+                })))
+    };
 
     private async Task HandleExportMarkdownAsync(string? content)
     {

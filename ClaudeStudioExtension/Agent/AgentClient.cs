@@ -3,11 +3,31 @@ using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Text.Json;
+using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using ClaudeStudioShared;
 
 namespace ClaudeStudioExtension.Agent;
+
+// What the chat does with a turn's chunks (AgentClient.DispatchChunk): the
+// callbacks of AskStreamingAsync, and for a turn claude starts by itself
+// (AgentClient.BackgroundCallbacks) the moments it starts and ends.
+public sealed class TurnCallbacks
+{
+    public Action<string> OnChunk { get; set; } = _ => { };
+    public Action<string>? OnTiming { get; set; }
+    public Action<string>? OnTokens { get; set; }
+    public Action<string>? OnSession { get; set; }
+    public Action<string, string, string?, string?, string?>? OnTool { get; set; }
+    public Action<string, string?, string, string?>? OnPermissionRequest { get; set; }
+    public Action<string, string>? OnDiagnosticsRequest { get; set; }
+    public Action<string>? OnThinking { get; set; }
+    public Action<ChatChunk>? OnSubagentEvent { get; set; }
+    public Action<string, string>? OnPermissionResolved { get; set; }
+    public Action? OnBackgroundStart { get; set; }
+    public Action? OnBackgroundEnd { get; set; }
+}
 
 public class AgentClient
 {
@@ -65,6 +85,9 @@ public class AgentClient
     {
         OutputLog.Info("request cancel requested");
         _cancelTcs?.TrySetResult(true);
+        // ■ during a turn claude started by itself: the same hard cancel; what
+        // it still writes until its done is dropped.
+        if (_backgroundActive) _backgroundCancelled = true;
         // Hard cancel on the agent side so the read loop unblocks and the next
         // request can start without "stream in use" errors. Fire-and-forget —
         // we don't want to block the UI thread; the agent's response will
@@ -156,6 +179,12 @@ public class AgentClient
         }
 
         OutputLog.Info($"agent started (pid {_process.Id})");
+
+        var lines = new LineQueue();
+        _lines = lines;
+        var reader = _reader;
+        _ = Task.Run(() => PumpAgentLinesAsync(reader, lines));
+        _ = Task.Run(() => ReadIdleAsync(lines));
     }
 
     public async Task SendPermissionResponseAsync(string toolUseId, bool allow, string? reason, string? allowSession = null)
@@ -256,11 +285,20 @@ public class AgentClient
 
             string? resultJson = null;
             string? error = null;
+            var lines = _lines;
             string? line;
-            while ((line = await _reader.ReadLineAsync()) != null)
+            while (lines != null && (line = await ReadLineOrNullAsync(lines)) != null)
             {
                 var chunk = JsonSerializer.Deserialize<ChatChunk>(line);
                 if (chunk == null) continue;
+                // not this request's: a turn claude started by itself, or what
+                // background agents need meanwhile
+                if (chunk.Background == true) { HandleBackgroundChunk(chunk); continue; }
+                if (chunk.Type is "permission_request" or "permission_resolved" or "diagnostics_request" or "shell-log")
+                {
+                    HandleStrayChunk(chunk);
+                    continue;
+                }
                 if (chunk.Type == "rewind-result") resultJson = chunk.Text;
                 else if (chunk.Type == "error") { error = chunk.Text; OutputLog.Error($"rewind error: {chunk.Text}"); }
                 else if (chunk.Type == "done") break;
@@ -287,11 +325,20 @@ public class AgentClient
 
             string? usageJson = null;
             string? error = null;
+            var lines = _lines;
             string? line;
-            while ((line = await _reader.ReadLineAsync()) != null)
+            while (lines != null && (line = await ReadLineOrNullAsync(lines)) != null)
             {
                 var chunk = JsonSerializer.Deserialize<ChatChunk>(line);
                 if (chunk == null) continue;
+                // not this request's: a turn claude started by itself, or what
+                // background agents need meanwhile
+                if (chunk.Background == true) { HandleBackgroundChunk(chunk); continue; }
+                if (chunk.Type is "permission_request" or "permission_resolved" or "diagnostics_request" or "shell-log")
+                {
+                    HandleStrayChunk(chunk);
+                    continue;
+                }
                 if (chunk.Type == "context-usage-result") usageJson = chunk.Text;
                 else if (chunk.Type == "error") { error = chunk.Text; OutputLog.Error($"context-usage error: {chunk.Text}"); }
                 else if (chunk.Type == "done") break;
@@ -318,11 +365,20 @@ public class AgentClient
 
             string? title = null;
             string? error = null;
+            var lines = _lines;
             string? line;
-            while ((line = await _reader.ReadLineAsync()) != null)
+            while (lines != null && (line = await ReadLineOrNullAsync(lines)) != null)
             {
                 var chunk = JsonSerializer.Deserialize<ChatChunk>(line);
                 if (chunk == null) continue;
+                // not this request's: a turn claude started by itself, or what
+                // background agents need meanwhile
+                if (chunk.Background == true) { HandleBackgroundChunk(chunk); continue; }
+                if (chunk.Type is "permission_request" or "permission_resolved" or "diagnostics_request" or "shell-log")
+                {
+                    HandleStrayChunk(chunk);
+                    continue;
+                }
                 // No OutputLog.Error here: the caller classifies. Canceling or
                 // clearing right after a turn kills claude before this request
                 // lands ("no active session") — an expected race, not a failure.
@@ -351,11 +407,20 @@ public class AgentClient
 
             string? serversJson = null;
             string? error = null;
+            var lines = _lines;
             string? line;
-            while ((line = await _reader.ReadLineAsync()) != null)
+            while (lines != null && (line = await ReadLineOrNullAsync(lines)) != null)
             {
                 var chunk = JsonSerializer.Deserialize<ChatChunk>(line);
                 if (chunk == null) continue;
+                // not this request's: a turn claude started by itself, or what
+                // background agents need meanwhile
+                if (chunk.Background == true) { HandleBackgroundChunk(chunk); continue; }
+                if (chunk.Type is "permission_request" or "permission_resolved" or "diagnostics_request" or "shell-log")
+                {
+                    HandleStrayChunk(chunk);
+                    continue;
+                }
                 if (chunk.Type == "mcp-status-result") serversJson = chunk.Text;
                 else if (chunk.Type == "error") { error = chunk.Text; OutputLog.Error($"mcp-status error: {chunk.Text}"); }
                 else if (chunk.Type == "done") break;
@@ -381,11 +446,20 @@ public class AgentClient
 
             string? answer = null;
             string? error = null;
+            var lines = _lines;
             string? line;
-            while ((line = await _reader.ReadLineAsync()) != null)
+            while (lines != null && (line = await ReadLineOrNullAsync(lines)) != null)
             {
                 var chunk = JsonSerializer.Deserialize<ChatChunk>(line);
                 if (chunk == null) continue;
+                // not this request's: a turn claude started by itself, or what
+                // background agents need meanwhile
+                if (chunk.Background == true) { HandleBackgroundChunk(chunk); continue; }
+                if (chunk.Type is "permission_request" or "permission_resolved" or "diagnostics_request" or "shell-log")
+                {
+                    HandleStrayChunk(chunk);
+                    continue;
+                }
                 if (chunk.Type == "side-question-result") answer = chunk.Text;
                 else if (chunk.Type == "error") { error = chunk.Text; OutputLog.Error($"side-question error: {chunk.Text}"); }
                 else if (chunk.Type == "done") break;
@@ -410,11 +484,20 @@ public class AgentClient
 
             string? error = null;
             var ok = false;
+            var lines = _lines;
             string? line;
-            while ((line = await _reader.ReadLineAsync()) != null)
+            while (lines != null && (line = await ReadLineOrNullAsync(lines)) != null)
             {
                 var chunk = JsonSerializer.Deserialize<ChatChunk>(line);
                 if (chunk == null) continue;
+                // not this request's: a turn claude started by itself, or what
+                // background agents need meanwhile
+                if (chunk.Background == true) { HandleBackgroundChunk(chunk); continue; }
+                if (chunk.Type is "permission_request" or "permission_resolved" or "diagnostics_request" or "shell-log")
+                {
+                    HandleStrayChunk(chunk);
+                    continue;
+                }
                 if (chunk.Type == "mcp-reconnect-result") ok = true;
                 else if (chunk.Type == "error") { error = chunk.Text; OutputLog.Error($"mcp-reconnect error: {chunk.Text}"); }
                 else if (chunk.Type == "done") break;
@@ -574,38 +657,46 @@ public class AgentClient
 
         _cancelTcs = new TaskCompletionSource<bool>();
         bool cancelled = false;
+        var callbacks = new TurnCallbacks
+        {
+            OnChunk = onChunk, OnTiming = onTiming, OnTokens = onTokens, OnSession = onSession, OnTool = onTool,
+            OnPermissionRequest = onPermissionRequest, OnDiagnosticsRequest = onDiagnosticsRequest, OnThinking = onThinking,
+            OnSubagentEvent = onSubagentEvent, OnPermissionResolved = onPermissionResolved
+        };
 
         while (true)
         {
             // The agent can be torn down mid-turn: a cancel puts this loop into
             // drain mode (see `if (cancelled) continue` below), and a following
-            // clear/reset runs StopAsync, which nulls _reader AND disposes the
-            // stream. The rodada-12 guard (~442) only revalidates at turn START,
-            // so the drain loop would re-read a now-null _reader here and NRE
-            // (rodada 15). Snapshot the field and bail if it's already gone; the
-            // try/catch covers the reader being disposed while a read is pending.
-            var reader = _reader;
-            if (reader == null) break;
+            // clear/reset runs StopAsync, which disposes the agent's stream and so
+            // closes its line channel. Snapshot the field and bail if it's already
+            // gone (rodada 15).
+            var lines = _lines;
+            if (lines == null) break;
 
             string? responseJson;
-            try
-            {
-                var readTask = reader.ReadLineAsync();
-                var winner = await Task.WhenAny(readTask, _cancelTcs.Task);
-                if (winner == _cancelTcs.Task) cancelled = true;
-                responseJson = await readTask;
-            }
-            catch (Exception ex) when (ex is ObjectDisposedException || ex is IOException)
+            var readTask = ReadLineOrNullAsync(lines);
+            var winner = await Task.WhenAny(readTask, _cancelTcs.Task);
+            if (winner == _cancelTcs.Task) cancelled = true;
+            responseJson = await readTask;
+
+            if (responseJson == null)
             {
                 OutputLog.Info("read loop ended: agent stream closed mid-turn");
                 break;
             }
 
-            if (responseJson == null) break;
-
             var chunk = JsonSerializer.Deserialize<ChatChunk>(responseJson);
 
             if (chunk == null) continue;
+
+            // A turn claude started by itself before this request's answer: its
+            // own, not this request's, done included.
+            if (chunk.Background == true)
+            {
+                HandleBackgroundChunk(chunk);
+                continue;
+            }
 
             if (chunk.Type == "done")
             {
@@ -624,218 +715,332 @@ public class AgentClient
             // feature is dead under stock settings.
             if (cancelled && chunk.Type != "permission_resolved") continue;
 
-            if (chunk.Type == "timing")
-            {
-                OutputLog.Info($"timing: {chunk.Text}");
-                onTiming?.Invoke(chunk.Text);
-                continue;
-            }
-
-            if (chunk.Type == "warn")
-            {
-                OutputLog.Warn(chunk.Text);
-                continue;
-            }
-
-            // Persistent shell commands and results, for the Shell output pane.
-            if (chunk.Type == "shell-log")
-            {
-                ShellLog.Write(chunk.Text);
-                continue;
-            }
-
-            // Agent-side notes that belong in the log but never in the chat —
-            // e.g. how many permission rules came from claude's settings files.
-            if (chunk.Type == "info")
-            {
-                OutputLog.Info(chunk.Text);
-                continue;
-            }
-
-            if (chunk.Type == "claude-pid")
-            {
-                if (int.TryParse(chunk.Text, out var claudePid))
-                {
-                    try { OnClaudePid?.Invoke(claudePid); }
-                    catch (Exception ex) { OutputLog.Warn($"presence watcher start failed: {ex.Message}"); }
-                }
-                continue;
-            }
-
-            if (chunk.Type == "tokens")
-            {
-                OutputLog.Info($"tokens: {chunk.Text}");
-                onTokens?.Invoke(chunk.Text);
-                continue;
-            }
-
-            if (chunk.Type == "tokens-live")
-            {
-                onTool?.Invoke("tokens-live", "", null, chunk.Text, null);
-                continue;
-            }
-
-            // CLI informational notices ("Unknown command: /x") — shown as a
-            // muted system line so the turn doesn't look like a silent no-op.
-            if (chunk.Type == "system-info")
-            {
-                OutputLog.Info($"system-info: {chunk.Text}");
-                onTool?.Invoke("system-info", "", null, chunk.Text, null);
-                continue;
-            }
-
-            if (chunk.Type == "session")
-            {
-                CurrentSessionId = chunk.Text;
-                OutputLog.Info($"session: {chunk.Text}");
-                onSession?.Invoke(chunk.Text);
-                StartJsonlWatcher(workingDirectory, chunk.Text, onTool);
-                continue;
-            }
-
-            if (chunk.Type == "thinking")
-            {
-                onThinking?.Invoke(chunk.Text);
-                continue;
-            }
-
-            // #7/#9: piggyback on the existing wide onTool callback (kind, name,
-            // input, text, id) the same way "system-info" already does — avoids
-            // growing this signature with two more single-purpose Actions.
-            if (chunk.Type == "user-ack")
-            {
-                onTool?.Invoke("user-ack", "", null, null, null);
-                continue;
-            }
-
-            if (chunk.Type == "rate-limit")
-            {
-                onTool?.Invoke("rate-limit", "", null, chunk.Text, null);
-                continue;
-            }
-
-            // #21: same onTool piggyback as user-ack/rate-limit/model-used —
-            // "compacting" is a start/stop presence signal, "compact-boundary"
-            // carries the pre/post token metadata as a raw JSON blob in text.
-            if (chunk.Type == "compacting" || chunk.Type == "compact-boundary")
-            {
-                onTool?.Invoke(chunk.Type, "", null, chunk.Text, null);
-                continue;
-            }
-
-            // #14: --fallback-model engagement/recovery signal — same onTool
-            // piggyback as user-ack/rate-limit above.
-            if (chunk.Type == "model-used")
-            {
-                onTool?.Invoke("model-used", "", null, chunk.Text, null);
-                continue;
-            }
-
-            // #13: subagent events carry more correlation fields (ParentToolId,
-            // SubagentType, TaskDescription) than onTool's 5 positional params
-            // fit — pass the whole ChatChunk through instead of piggybacking.
-            if (chunk.Type.StartsWith("subagent-", StringComparison.Ordinal))
-            {
-                onSubagentEvent?.Invoke(chunk);
-                continue;
-            }
-
-            // #11: same sentinel-on-onChunk trick as CLAUDE_NOT_FOUND:: below —
-            // a terminal, turn-ending condition that needs distinct UI treatment
-            // (not a new callback param, not a plain chat error bubble).
-            if (chunk.Type == "budget-exceeded")
-            {
-                onChunk("BUDGET_EXCEEDED::" + (chunk.Text ?? ""));
-                continue;
-            }
-
-            // NEVER break on error/claude-not-found: the agent always follows a
-            // fatal one with "done" (and mid-turn errors are informational — the
-            // turn keeps streaming). Breaking early left that "done" orphaned in
-            // the pipe, and every subsequent request then completed instantly
-            // against the previous request's done — the chat ran one message
-            // behind until the agent restarted (D7, validation 2026-07-18).
-            if (chunk.Type == "error")
-            {
-                OutputLog.Error($"agent error: {chunk.Text}");
-                if (!string.IsNullOrEmpty(chunk.Text))
-                {
-                    // An expired session survives the pre-flight IsSignedIn() check
-                    // (oauthAccount stays in ~/.claude.json — it holds profile fields
-                    // only, no token and no expiry), so the CLI is the first thing to
-                    // notice. Same sentinel trick as CLAUDE_NOT_FOUND:: below, routing
-                    // it to the sign-in card instead of a dead-end error bubble.
-                    // "Prompt is too long" gets the same treatment: the session's
-                    // context is over the ceiling and every resume of it refails, so
-                    // route it to the "start a new session" card.
-                    // A model that needs paid usage credits (e.g. Fable) fails
-                    // the turn on the way in; route it to the "choose another
-                    // model" card instead of a raw bubble.
-                    string routed;
-                    if (ClaudeStudioShared.AuthErrors.IsAuthFailure(chunk.Text))
-                        routed = "AUTH_REQUIRED::" + chunk.Text;
-                    else if (ClaudeStudioShared.ContextErrors.IsContextOverflow(chunk.Text))
-                        routed = "CONTEXT_FULL::" + chunk.Text;
-                    else if (ClaudeStudioShared.CreditErrors.IsOutOfCredits(chunk.Text))
-                        routed = "CREDITS_REQUIRED::" + chunk.Text;
-                    else
-                        routed = chunk.Text;
-                    onChunk(routed);
-                }
-                continue;
-            }
-
-            // claude.exe missing — route through onChunk with a sentinel so the
-            // control can show a dedicated install card instead of a chat error.
-            if (chunk.Type == "claude-not-found")
-            {
-                OutputLog.Error($"claude not found: {chunk.Text}");
-                onChunk("CLAUDE_NOT_FOUND::" + (chunk.Text ?? ""));
-                continue;
-            }
-
-            if (chunk.Type == "chunk" && !string.IsNullOrEmpty(chunk.Text))
-                onChunk(chunk.Text);
-
-            if (chunk.Type == "tool_use" || chunk.Type == "tool_result" || chunk.Type == "tool_error")
-            {
-                OutputLog.Info($"{chunk.Type}: {chunk.Tool ?? "-"} id={chunk.ToolId ?? "-"} bytes={(chunk.ToolInput ?? chunk.Text ?? "").Length}");
-                onTool?.Invoke(chunk.Type, chunk.Tool ?? "", chunk.ToolInput, chunk.Text, chunk.ToolId);
-            }
-
-            // Decided by a rule / session allowlist, so no modal and no UI trace —
-            // the log line is the only way to tell it apart from a tool that
-            // simply never needed permission.
-            if (chunk.Type == "permission_auto")
-            {
-                OutputLog.Info($"permission auto: {chunk.Tool ?? "-"} — {chunk.Text}");
-                continue;
-            }
-
-            if (chunk.Type == "permission_request")
-            {
-                OutputLog.Info($"permission_request: {chunk.Tool ?? "-"} id={chunk.ToolId ?? "-"} cwd={chunk.Cwd ?? "-"}");
-                onPermissionRequest?.Invoke(chunk.Tool ?? "", chunk.ToolInput, chunk.ToolId ?? "", chunk.Cwd);
-            }
-
-            // Timeout/cancel/shutdown resolved it without the user, so the card
-            // has to come down before claude moves on — otherwise it is answered
-            // into a tool_use_id the agent already closed.
-            if (chunk.Type == "permission_resolved")
-            {
-                OutputLog.Info($"permission_resolved: id={chunk.ToolId ?? "-"} ({chunk.Text})");
-                onPermissionResolved?.Invoke(chunk.ToolId ?? "", chunk.Text ?? "");
-            }
-
-            if (chunk.Type == "diagnostics_request")
-            {
-                // Text carries the file path, ToolId the correlation id.
-                OutputLog.Info($"diagnostics_request: file={chunk.Text} id={chunk.ToolId ?? "-"}");
-                onDiagnosticsRequest?.Invoke(chunk.Text ?? "", chunk.ToolId ?? "");
-            }
+            DispatchChunk(chunk, callbacks, workingDirectory);
         }
 
         _cancelTcs = null;
+    }
+
+    // What a turn's chunks do: the same for a request's turn and for a turn
+    // claude started by itself (background agents finishing).
+    private void DispatchChunk(ChatChunk chunk, TurnCallbacks cb, string? workingDirectory)
+    {
+        var onChunk = cb.OnChunk;
+        var onTool = cb.OnTool;
+
+        if (chunk.Type == "timing")
+        {
+            OutputLog.Info($"timing: {chunk.Text}");
+            cb.OnTiming?.Invoke(chunk.Text);
+            return;
+        }
+
+        if (chunk.Type == "warn")
+        {
+            OutputLog.Warn(chunk.Text);
+            return;
+        }
+
+        // Persistent shell commands and results, for the Shell output pane.
+        if (chunk.Type == "shell-log")
+        {
+            ShellLog.Write(chunk.Text);
+            return;
+        }
+
+        // Agent-side notes that belong in the log but never in the chat —
+        // e.g. how many permission rules came from claude's settings files.
+        if (chunk.Type == "info")
+        {
+            OutputLog.Info(chunk.Text);
+            return;
+        }
+
+        if (chunk.Type == "claude-pid")
+        {
+            if (int.TryParse(chunk.Text, out var claudePid))
+            {
+                try { OnClaudePid?.Invoke(claudePid); }
+                catch (Exception ex) { OutputLog.Warn($"presence watcher start failed: {ex.Message}"); }
+            }
+            return;
+        }
+
+        if (chunk.Type == "tokens")
+        {
+            OutputLog.Info($"tokens: {chunk.Text}");
+            cb.OnTokens?.Invoke(chunk.Text);
+            return;
+        }
+
+        if (chunk.Type == "tokens-live")
+        {
+            onTool?.Invoke("tokens-live", "", null, chunk.Text, null);
+            return;
+        }
+
+        // CLI informational notices ("Unknown command: /x") — shown as a
+        // muted system line so the turn doesn't look like a silent no-op.
+        if (chunk.Type == "system-info")
+        {
+            OutputLog.Info($"system-info: {chunk.Text}");
+            onTool?.Invoke("system-info", "", null, chunk.Text, null);
+            return;
+        }
+
+        if (chunk.Type == "session")
+        {
+            CurrentSessionId = chunk.Text;
+            OutputLog.Info($"session: {chunk.Text}");
+            cb.OnSession?.Invoke(chunk.Text);
+            StartJsonlWatcher(workingDirectory, chunk.Text, onTool);
+            return;
+        }
+
+        if (chunk.Type == "thinking")
+        {
+            cb.OnThinking?.Invoke(chunk.Text);
+            return;
+        }
+
+        // #7/#9: piggyback on the existing wide onTool callback (kind, name,
+        // input, text, id) the same way "system-info" already does — avoids
+        // growing this signature with two more single-purpose Actions.
+        if (chunk.Type == "user-ack")
+        {
+            onTool?.Invoke("user-ack", "", null, null, null);
+            return;
+        }
+
+        if (chunk.Type == "rate-limit")
+        {
+            onTool?.Invoke("rate-limit", "", null, chunk.Text, null);
+            return;
+        }
+
+        // #21: same onTool piggyback as user-ack/rate-limit/model-used —
+        // "compacting" is a start/stop presence signal, "compact-boundary"
+        // carries the pre/post token metadata as a raw JSON blob in text.
+        if (chunk.Type == "compacting" || chunk.Type == "compact-boundary")
+        {
+            onTool?.Invoke(chunk.Type, "", null, chunk.Text, null);
+            return;
+        }
+
+        // #14: --fallback-model engagement/recovery signal — same onTool
+        // piggyback as user-ack/rate-limit above.
+        if (chunk.Type == "model-used")
+        {
+            onTool?.Invoke("model-used", "", null, chunk.Text, null);
+            return;
+        }
+
+        // #13: subagent events carry more correlation fields (ParentToolId,
+        // SubagentType, TaskDescription) than onTool's 5 positional params
+        // fit — pass the whole ChatChunk through instead of piggybacking.
+        if (chunk.Type.StartsWith("subagent-", StringComparison.Ordinal))
+        {
+            cb.OnSubagentEvent?.Invoke(chunk);
+            return;
+        }
+
+        // #11: same sentinel-on-onChunk trick as CLAUDE_NOT_FOUND:: below —
+        // a terminal, turn-ending condition that needs distinct UI treatment
+        // (not a new callback param, not a plain chat error bubble).
+        if (chunk.Type == "budget-exceeded")
+        {
+            onChunk("BUDGET_EXCEEDED::" + (chunk.Text ?? ""));
+            return;
+        }
+
+        // NEVER break on error/claude-not-found: the agent always follows a
+        // fatal one with "done" (and mid-turn errors are informational — the
+        // turn keeps streaming). Breaking early left that "done" orphaned in
+        // the pipe, and every subsequent request then completed instantly
+        // against the previous request's done — the chat ran one message
+        // behind until the agent restarted (D7, validation 2026-07-18).
+        if (chunk.Type == "error")
+        {
+            OutputLog.Error($"agent error: {chunk.Text}");
+            if (!string.IsNullOrEmpty(chunk.Text))
+            {
+                // An expired session survives the pre-flight IsSignedIn() check
+                // (oauthAccount stays in ~/.claude.json — it holds profile fields
+                // only, no token and no expiry), so the CLI is the first thing to
+                // notice. Same sentinel trick as CLAUDE_NOT_FOUND:: below, routing
+                // it to the sign-in card instead of a dead-end error bubble.
+                // "Prompt is too long" gets the same treatment: the session's
+                // context is over the ceiling and every resume of it refails, so
+                // route it to the "start a new session" card.
+                // A model that needs paid usage credits (e.g. Fable) fails
+                // the turn on the way in; route it to the "choose another
+                // model" card instead of a raw bubble.
+                string routed;
+                if (ClaudeStudioShared.AuthErrors.IsAuthFailure(chunk.Text))
+                    routed = "AUTH_REQUIRED::" + chunk.Text;
+                else if (ClaudeStudioShared.ContextErrors.IsContextOverflow(chunk.Text))
+                    routed = "CONTEXT_FULL::" + chunk.Text;
+                else if (ClaudeStudioShared.CreditErrors.IsOutOfCredits(chunk.Text))
+                    routed = "CREDITS_REQUIRED::" + chunk.Text;
+                else
+                    routed = chunk.Text;
+                onChunk(routed);
+            }
+            return;
+        }
+
+        // claude.exe missing — route through onChunk with a sentinel so the
+        // control can show a dedicated install card instead of a chat error.
+        if (chunk.Type == "claude-not-found")
+        {
+            OutputLog.Error($"claude not found: {chunk.Text}");
+            onChunk("CLAUDE_NOT_FOUND::" + (chunk.Text ?? ""));
+            return;
+        }
+
+        if (chunk.Type == "chunk" && !string.IsNullOrEmpty(chunk.Text))
+            onChunk(chunk.Text);
+
+        if (chunk.Type == "tool_use" || chunk.Type == "tool_result" || chunk.Type == "tool_error")
+        {
+            OutputLog.Info($"{chunk.Type}: {chunk.Tool ?? "-"} id={chunk.ToolId ?? "-"} bytes={(chunk.ToolInput ?? chunk.Text ?? "").Length}");
+            onTool?.Invoke(chunk.Type, chunk.Tool ?? "", chunk.ToolInput, chunk.Text, chunk.ToolId);
+        }
+
+        // Decided by a rule / session allowlist, so no modal and no UI trace —
+        // the log line is the only way to tell it apart from a tool that
+        // simply never needed permission.
+        if (chunk.Type == "permission_auto")
+        {
+            OutputLog.Info($"permission auto: {chunk.Tool ?? "-"} — {chunk.Text}");
+            return;
+        }
+
+        if (chunk.Type == "permission_request")
+        {
+            OutputLog.Info($"permission_request: {chunk.Tool ?? "-"} id={chunk.ToolId ?? "-"} cwd={chunk.Cwd ?? "-"}");
+            cb.OnPermissionRequest?.Invoke(chunk.Tool ?? "", chunk.ToolInput, chunk.ToolId ?? "", chunk.Cwd);
+        }
+
+        // Timeout/cancel/shutdown resolved it without the user, so the card
+        // has to come down before claude moves on — otherwise it is answered
+        // into a tool_use_id the agent already closed.
+        if (chunk.Type == "permission_resolved")
+        {
+            OutputLog.Info($"permission_resolved: id={chunk.ToolId ?? "-"} ({chunk.Text})");
+            cb.OnPermissionResolved?.Invoke(chunk.ToolId ?? "", chunk.Text ?? "");
+        }
+
+        if (chunk.Type == "diagnostics_request")
+        {
+            // Text carries the file path, ToolId the correlation id.
+            OutputLog.Info($"diagnostics_request: file={chunk.Text} id={chunk.ToolId ?? "-"}");
+            cb.OnDiagnosticsRequest?.Invoke(chunk.Text ?? "", chunk.ToolId ?? "");
+        }
+    }
+
+    // ── Between requests ─────────────────────────────────────────────────────
+    // The agent's stdout has one reader for the agent's life (PumpAgentLinesAsync),
+    // so what the agent writes when no request is waiting is read too: a turn
+    // claude started by itself (Background chunks), and what background agents
+    // need meanwhile (permission prompts, VS bridge requests). Request loops read
+    // _lines under _streamingSemaphore; ReadIdleAsync reads it between them.
+    private LineQueue? _lines;
+
+    // What the chat shows a turn claude started by itself with, and the working
+    // directory its session runs in. Set by the control on every send.
+    public TurnCallbacks? BackgroundCallbacks { get; set; }
+    public string? BackgroundWorkingDirectory { get; set; }
+    private bool _backgroundActive, _backgroundCancelled;
+
+    private static Task<string?> ReadLineOrNullAsync(LineQueue lines) => lines.ReadAsync();
+
+    private static async Task PumpAgentLinesAsync(StreamReader reader, LineQueue lines)
+    {
+        try
+        {
+            string? line;
+            while ((line = await reader.ReadLineAsync()) != null)
+                lines.Write(line);
+        }
+        catch { /* the agent stopped: its stream is disposed or broken */ }
+        finally { lines.Complete(); }
+    }
+
+    private async Task ReadIdleAsync(LineQueue lines)
+    {
+        try
+        {
+            while (await lines.WaitToReadAsync())
+            {
+                await _streamingSemaphore.WaitAsync();
+                try
+                {
+                    while (lines.TryRead(out var line))
+                    {
+                        ChatChunk? chunk;
+                        try { chunk = JsonSerializer.Deserialize<ChatChunk>(line); }
+                        catch { continue; }
+                        if (chunk == null) continue;
+                        if (chunk.Background == true) HandleBackgroundChunk(chunk);
+                        else HandleStrayChunk(chunk);
+                    }
+                }
+                finally { _streamingSemaphore.Release(); }
+            }
+        }
+        catch (Exception ex)
+        {
+            OutputLog.Warn($"idle agent reader failed: {ex.Message}");
+        }
+    }
+
+    private void HandleBackgroundChunk(ChatChunk chunk)
+    {
+        var cb = BackgroundCallbacks;
+        if (chunk.Type == "background-turn")
+        {
+            OutputLog.Info("background turn: claude continues on its own (background agents)");
+            _backgroundActive = true;
+            _backgroundCancelled = false;
+            cb?.OnBackgroundStart?.Invoke();
+            return;
+        }
+        if (chunk.Type == "done")
+        {
+            OutputLog.Info(_backgroundCancelled ? "background turn done (after cancel)" : "background turn done");
+            _backgroundActive = false;
+            cb?.OnBackgroundEnd?.Invoke();
+            return;
+        }
+        if (cb == null || _backgroundCancelled && chunk.Type != "permission_resolved") return;
+        DispatchChunk(chunk, cb, BackgroundWorkingDirectory);
+    }
+
+    // A chunk outside any request or background turn: what the agent writes for
+    // background agents (their permission prompts, VS bridge requests) and its
+    // logs. Anything else has no turn to go to.
+    private static readonly HashSet<string> StrayChunkTypes = new(StringComparer.Ordinal)
+    {
+        "permission_request", "permission_resolved", "permission_auto", "diagnostics_request",
+        "shell-log", "timing", "info", "warn", "error"
+    };
+
+    private void HandleStrayChunk(ChatChunk chunk)
+    {
+        if (!StrayChunkTypes.Contains(chunk.Type))
+        {
+            OutputLog.Info($"agent output between requests ignored: {chunk.Type}");
+            return;
+        }
+        if (chunk.Type == "error")
+        {
+            OutputLog.Error($"agent error: {chunk.Text}");
+            return;
+        }
+        if (BackgroundCallbacks is { } cb) DispatchChunk(chunk, cb, BackgroundWorkingDirectory);
+        else if (chunk.Type is "permission_request" or "diagnostics_request")
+            OutputLog.Warn($"{chunk.Type} between requests with no chat to show it in (id={chunk.ToolId ?? "-"})");
     }
 
     private string? _watcherSessionId;

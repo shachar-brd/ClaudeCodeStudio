@@ -442,6 +442,14 @@ sealed class ClaudeSession : IAsyncDisposable
     // modal uses — the stdin reader tries the pipe first, then this registry.
     private readonly ConcurrentDictionary<string, PendingAsk> _pendingControlPerms = new();
     private StreamReader? _stdout;
+    // claude's stdout has one reader for the session's life (PumpStdoutAsync):
+    // control requests (hooks, MCP) are answered as they come, also between
+    // turns, when background agents still call tools; every other event is
+    // queued here for whoever holds _turnLock: a turn the user started, a
+    // control request, or ReadIdleAsync for a turn claude starts by itself.
+    private Channel<JsonElement>? _events;
+    private Task? _stdoutPump, _idleReader;
+    private readonly SemaphoreSlim _turnLock = new(1, 1);
     private readonly StringBuilder _stderrBuffer = new();
     private Task? _stderrPump;
     private string? _settingsTempDir;
@@ -932,6 +940,12 @@ Every tool call here has a fixed overhead of a few seconds (security hooks run b
                 // waitingFor updates. Emitted mid-turn, so the read loop picks it up.
                 Console.WriteLine(JsonSerializer.Serialize(new ChatChunk { Type = "claude-pid", Text = _proc!.Id.ToString() }));
                 Console.Out.Flush();
+
+                var events = Channel.CreateUnbounded<JsonElement>(new UnboundedChannelOptions { SingleWriter = true });
+                _events = events;
+                var stdout = _stdout;
+                _stdoutPump = Task.Run(() => PumpStdoutAsync(stdout, events.Writer));
+                _idleReader = Task.Run(() => ReadIdleAsync(events.Reader));
                 break;
             }
 
@@ -1307,33 +1321,121 @@ Every tool call here has a fixed overhead of a few seconds (security hooks run b
         if (_stdin == null || _stdout == null || _proc == null || _proc.HasExited)
             throw new InvalidOperationException("session not started or already exited");
 
-        var sw = Stopwatch.StartNew();
+        // Behind a turn claude started by itself, if one is running: claude
+        // would queue the message anyway, and its answer must not be read as
+        // the end of that turn.
+        await _turnLock.WaitAsync();
+        try
+        {
+            var sw = Stopwatch.StartNew();
+
+            var userMsg = new
+            {
+                type = "user",
+                message = new { role = "user", content = userText },
+                parent_tool_use_id = (string?)null,
+                session_id = SessionId ?? ""
+            };
+            var ndjson = JsonSerializer.Serialize(userMsg);
+
+            await _stdinLock.WaitAsync();
+            try
+            {
+                await _stdin.WriteLineAsync(ndjson);
+                await _stdin.FlushAsync();
+            }
+            finally { _stdinLock.Release(); }
+
+            var msgSentMs = sw.ElapsedMilliseconds;
+            EmitTiming("message sent", msgSentMs);
+
+            await ReadTurnAsync(sw, msgSentMs, background: false);
+        }
+        finally { _turnLock.Release(); }
+    }
+
+    // The next queued stdout event (control requests are already answered by
+    // the pump); null once claude's stdout is closed. The caller holds _turnLock.
+    private async Task<JsonElement?> NextEventAsync()
+    {
+        var events = _events;
+        if (events == null) return null;
+        try { return await events.Reader.ReadAsync(); }
+        catch (ChannelClosedException) { return null; }
+    }
+
+    // claude's stdout, for the session's life. A control request is answered at
+    // once, whoever reads the rest: claude waits on hooks and MCP calls of
+    // background agents between turns too, and nothing else would see them.
+    private async Task PumpStdoutAsync(StreamReader stdout, ChannelWriter<JsonElement> events)
+    {
+        try
+        {
+            string? line;
+            while ((line = await stdout.ReadLineAsync()) != null)
+            {
+                if (string.IsNullOrWhiteSpace(line)) continue;
+                JsonElement evt;
+                try { evt = JsonSerializer.Deserialize<JsonElement>(line); }
+                catch { continue; }
+                if (TryDispatchControlRequest(evt)) continue;
+                events.TryWrite(evt);
+            }
+        }
+        catch { /* stdout disposed: the session is going away */ }
+        finally { events.TryComplete(); }
+    }
+
+    // Between requests: what nobody is reading is claude's own. A turn it
+    // starts by itself (background agents finishing, their results coming in)
+    // is forwarded as a background turn; other events (subagent progress,
+    // rate limits) are dropped, as no turn waits for them.
+    private async Task ReadIdleAsync(ChannelReader<JsonElement> events)
+    {
+        try
+        {
+            while (await events.WaitToReadAsync())
+            {
+                await _turnLock.WaitAsync();
+                try
+                {
+                    while (events.TryPeek(out var evt) && !StreamEventParser.StartsTurn(evt))
+                        events.TryRead(out _);
+                    if (events.TryPeek(out _))
+                        await ReadTurnAsync(Stopwatch.StartNew(), 0, background: true);
+                }
+                finally { _turnLock.Release(); }
+            }
+        }
+        catch (Exception ex)
+        {
+            EmitError($"background turn reader failed: {ex.Message}");
+        }
+    }
+
+    // One turn's events, up to its result, written to the extension as chunks.
+    // background: claude started it by itself; its chunks are flagged, opened by
+    // a background-turn chunk and closed by their own done.
+    private async Task ReadTurnAsync(Stopwatch sw, long msgSentMs, bool background)
+    {
+        void Emit(ChatChunk chunk)
+        {
+            if (background) chunk.Background = true;
+            Console.WriteLine(JsonSerializer.Serialize(chunk));
+            Console.Out.Flush();
+        }
 
         // Checkpoints for the perf.jsonl line (#22b) — mirrors the EmitTiming
         // calls below so the harness measures exactly what the timing chunks
         // already show the UI, just persisted instead of transient.
-        long msgSentMs = 0, firstLineMs = 0, firstChunkMs = 0, resultMs = 0;
+        long firstLineMs = 0, firstChunkMs = 0, resultMs = 0;
         int finalInputTok = 0, finalOutputTok = 0, finalCacheCreate = 0, finalCacheRead = 0;
 
-        var userMsg = new
+        if (background)
         {
-            type = "user",
-            message = new { role = "user", content = userText },
-            parent_tool_use_id = (string?)null,
-            session_id = SessionId ?? ""
-        };
-        var ndjson = JsonSerializer.Serialize(userMsg);
-
-        await _stdinLock.WaitAsync();
-        try
-        {
-            await _stdin.WriteLineAsync(ndjson);
-            await _stdin.FlushAsync();
+            Emit(new ChatChunk { Type = "background-turn" });
+            EmitTiming("background turn: claude continues on its own (background agents)", 0);
         }
-        finally { _stdinLock.Release(); }
-
-        msgSentMs = sw.ElapsedMilliseconds;
-        EmitTiming("message sent", msgSentMs);
 
         bool firstLine = true;
         bool firstChunk = true;
@@ -1341,26 +1443,17 @@ Every tool call here has a fixed overhead of a few seconds (security hooks run b
         // Carried across stdout lines within this turn so StreamEventParser can
         // dedup an API error the CLI surfaces both as a synthetic assistant
         // message and as the terminal is_error result (they arrive on separate
-        // lines). Turn-scoped: it resets naturally on the next SendMessageAsync.
+        // lines). Turn-scoped: it resets naturally on the next turn.
         string? lastSyntheticText = null;
 
-        string? line;
-        while ((line = await _stdout.ReadLineAsync()) != null)
+        while (await NextEventAsync() is { } evt)
         {
-            if (string.IsNullOrWhiteSpace(line)) continue;
-
-            if (firstLine)
+            if (firstLine && !background)
             {
                 firstLineMs = sw.ElapsedMilliseconds;
                 EmitTiming("first stdout line", firstLineMs);
-                firstLine = false;
             }
-
-            JsonElement evt;
-            try { evt = JsonSerializer.Deserialize<JsonElement>(line); }
-            catch { continue; }
-
-            if (TryDispatchControlRequest(evt)) continue;
+            firstLine = false;
 
             // #22a: the type/subtype classification that used to live inline
             // here now lives in ClaudeStudioShared.StreamEventParser, unit
@@ -1379,14 +1472,13 @@ Every tool call here has a fixed overhead of a few seconds (security hooks run b
 
             foreach (var chunk in result.Chunks)
             {
-                if (firstChunk && chunk.Type == "chunk")
+                if (firstChunk && chunk.Type == "chunk" && !background)
                 {
                     firstChunkMs = sw.ElapsedMilliseconds;
                     EmitTiming("first chunk", firstChunkMs);
                     firstChunk = false;
                 }
-                Console.WriteLine(JsonSerializer.Serialize(chunk));
-                Console.Out.Flush();
+                Emit(chunk);
             }
 
             if (result.PendingAsk is { } ask)
@@ -1401,56 +1493,56 @@ Every tool call here has a fixed overhead of a few seconds (security hooks run b
 
             if (result.Outcome == StreamEventOutcome.Done)
             {
-                if (result.FinalTokens is { } t)
+                if (!background)
                 {
-                    finalInputTok = t.Input;
-                    finalOutputTok = t.Output;
-                    finalCacheCreate = t.CacheCreate;
-                    finalCacheRead = t.CacheRead;
-                }
-                resultMs = lineElapsedMs;
-                var totalMs = sw.ElapsedMilliseconds;
-                EmitTiming("total", totalMs);
-                AppendPerfLog(new
-                {
-                    ts = DateTime.UtcNow.ToString("o"),
-                    cliVersion = _claudeVersion,
-                    model = _model,
-                    effort = _effort,
-                    permissionMode = _permissionMode,
-                    sessionId = SessionId,
-                    timings = new
+                    if (result.FinalTokens is { } t)
                     {
-                        messageSentMs = msgSentMs,
-                        firstStdoutLineMs = firstLineMs,
-                        firstChunkMs,
-                        resultMs,
-                        totalMs
-                    },
-                    tokens = new
-                    {
-                        input = finalInputTok,
-                        output = finalOutputTok,
-                        cacheCreate = finalCacheCreate,
-                        cacheRead = finalCacheRead
+                        finalInputTok = t.Input;
+                        finalOutputTok = t.Output;
+                        finalCacheCreate = t.CacheCreate;
+                        finalCacheRead = t.CacheRead;
                     }
-                });
-                Console.WriteLine(JsonSerializer.Serialize(new ChatChunk { Type = "done" }));
-                Console.Out.Flush();
+                    resultMs = lineElapsedMs;
+                    var totalMs = sw.ElapsedMilliseconds;
+                    EmitTiming("total", totalMs);
+                    AppendPerfLog(new
+                    {
+                        ts = DateTime.UtcNow.ToString("o"),
+                        cliVersion = _claudeVersion,
+                        model = _model,
+                        effort = _effort,
+                        permissionMode = _permissionMode,
+                        sessionId = SessionId,
+                        timings = new
+                        {
+                            messageSentMs = msgSentMs,
+                            firstStdoutLineMs = firstLineMs,
+                            firstChunkMs,
+                            resultMs,
+                            totalMs
+                        },
+                        tokens = new
+                        {
+                            input = finalInputTok,
+                            output = finalOutputTok,
+                            cacheCreate = finalCacheCreate,
+                            cacheRead = finalCacheRead
+                        }
+                    });
+                }
+                Emit(new ChatChunk { Type = "done" });
                 return;
             }
         }
 
         // stdout closed mid-turn — claude died
         var stderr = SnapshotStderr();
-        Console.WriteLine(JsonSerializer.Serialize(new ChatChunk
+        Emit(new ChatChunk
         {
             Type = "error",
             Text = string.IsNullOrWhiteSpace(stderr) ? "claude session ended unexpectedly" : stderr.Trim()
-        }));
-        Console.Out.Flush();
-        Console.WriteLine(JsonSerializer.Serialize(new ChatChunk { Type = "done" }));
-        Console.Out.Flush();
+        });
+        Emit(new ChatChunk { Type = "done" });
     }
 
     // Sends a rewind_files control_request to the running claude and forwards the
@@ -1513,38 +1605,37 @@ Every tool call here has a fixed overhead of a few seconds (security hooks run b
         var requestId = label + "-" + Guid.NewGuid().ToString("N");
         var ndjson = JsonSerializer.Serialize(new { type = "control_request", request_id = requestId, request });
 
-        await _stdinLock.WaitAsync();
+        await _turnLock.WaitAsync();
         try
         {
-            await _stdin.WriteLineAsync(ndjson);
-            await _stdin.FlushAsync();
-        }
-        finally { _stdinLock.Release(); }
-
-        string? line;
-        while ((line = await _stdout.ReadLineAsync()) != null)
-        {
-            if (string.IsNullOrWhiteSpace(line)) continue;
-            JsonElement evt;
-            try { evt = JsonSerializer.Deserialize<JsonElement>(line); }
-            catch { continue; }
-            if (TryDispatchControlRequest(evt)) continue;
-            if (!evt.TryGetProperty("type", out var tp) || tp.GetString() != "control_response") continue;
-            if (!evt.TryGetProperty("response", out var resp)) continue;
-            if (!resp.TryGetProperty("request_id", out var rid) || rid.GetString() != requestId) continue;
-
-            var subtype = resp.TryGetProperty("subtype", out var st) ? st.GetString() : null;
-            if (subtype == "error")
+            await _stdinLock.WaitAsync();
+            try
             {
-                var errMsg = resp.TryGetProperty("error", out var er) ? er.GetString() : $"{label} failed";
-                Console.WriteLine(JsonSerializer.Serialize(new ChatChunk { Type = quietErrors ? "timing" : "error", Text = $"{label}: {errMsg}" }));
-                Console.Out.Flush();
-                return null;
+                await _stdin.WriteLineAsync(ndjson);
+                await _stdin.FlushAsync();
             }
-            if (resp.TryGetProperty("response", out var rr))
-                return rr.Clone();
-            return JsonSerializer.Deserialize<JsonElement>("{}");
+            finally { _stdinLock.Release(); }
+
+            while (await NextEventAsync() is { } evt)
+            {
+                if (!evt.TryGetProperty("type", out var tp) || tp.GetString() != "control_response") continue;
+                if (!evt.TryGetProperty("response", out var resp)) continue;
+                if (!resp.TryGetProperty("request_id", out var rid) || rid.GetString() != requestId) continue;
+
+                var subtype = resp.TryGetProperty("subtype", out var st) ? st.GetString() : null;
+                if (subtype == "error")
+                {
+                    var errMsg = resp.TryGetProperty("error", out var er) ? er.GetString() : $"{label} failed";
+                    Console.WriteLine(JsonSerializer.Serialize(new ChatChunk { Type = quietErrors ? "timing" : "error", Text = $"{label}: {errMsg}" }));
+                    Console.Out.Flush();
+                    return null;
+                }
+                if (resp.TryGetProperty("response", out var rr))
+                    return rr.Clone();
+                return JsonSerializer.Deserialize<JsonElement>("{}");
+            }
         }
+        finally { _turnLock.Release(); }
 
         Console.WriteLine(JsonSerializer.Serialize(new ChatChunk { Type = quietErrors ? "timing" : "error", Text = $"{label}: claude exited before responding" }));
         Console.Out.Flush();

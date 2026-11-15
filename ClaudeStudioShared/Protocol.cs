@@ -145,6 +145,10 @@ public class ChatChunk
     public string? ParentToolId { get; set; }
     public string? SubagentType { get; set; }
     public string? TaskDescription { get; set; }
+    // Part of a turn claude started by itself, between requests (background
+    // agents finishing): opened by a "background-turn" chunk, closed by its own
+    // "done", never the answer to the request being read.
+    public bool? Background { get; set; }
 }
 
 public class PermissionResponse

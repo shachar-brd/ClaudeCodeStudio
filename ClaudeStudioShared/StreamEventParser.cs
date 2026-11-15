@@ -39,6 +39,18 @@ public sealed class StreamEventResult
 // stays in the caller — this only classifies and returns data.
 public static class StreamEventParser
 {
+    // A main-agent event that only comes inside a model turn, which always ends
+    // with a result: read between requests, it means claude started a turn by
+    // itself (background agents finishing). Subagent events (with a
+    // parent_tool_use_id) also come while the main agent is idle and background
+    // agents work; they start no turn, so the user can keep chatting meanwhile.
+    public static bool StartsTurn(JsonElement evt)
+    {
+        var type = evt.TryGetProperty("type", out var tp) && tp.ValueKind == JsonValueKind.String ? tp.GetString() : null;
+        if (type is not ("stream_event" or "assistant" or "user")) return false;
+        return !evt.TryGetProperty("parent_tool_use_id", out var parent) || parent.ValueKind != JsonValueKind.String;
+    }
+
     // elapsedMs is the caller's Stopwatch reading at the moment this line
     // arrived — used only to format the "claude init"/"result received"
     // timing chunks in the exact stdout position they occupy today (as

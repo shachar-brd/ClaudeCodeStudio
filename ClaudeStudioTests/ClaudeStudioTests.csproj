@@ -26,6 +26,7 @@
     <Compile Include="..\ClaudeStudioExtension\GatewayLogin.cs" Link="Linked\GatewayLogin.cs" />
     <Compile Include="..\ClaudeStudioExtension\ClaudePaths.cs" Link="Linked\ClaudePaths.cs" />
     <Compile Include="..\ClaudeStudioAgent\PersistentShell.cs" Link="Linked\PersistentShell.cs" />
+    <Compile Include="..\ClaudeStudioExtension\Agent\LineQueue.cs" Link="Linked\LineQueue.cs" />
   </ItemGroup>
 
 </Project>

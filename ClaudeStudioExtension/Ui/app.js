@@ -1826,10 +1826,43 @@ let currentStreamBubble = null;
 let isStreaming = false;
 const btnSend = document.getElementById("btn-send");
 
+const idlePlaceholder = textarea.placeholder;
+
 function setStreaming(on) {
     isStreaming = on;
     btnSend.textContent = on ? "■" : "\u27A2";
     btnSend.classList.toggle("stop", on);
+    textarea.placeholder = on ? "Claude is working · Enter sends a message it takes at its next step · ■ stops" : idlePlaceholder;
+}
+
+// Enter while a turn runs: the message goes to that turn, which takes it at its
+// next step (after the tool call running now), so the user can correct its
+// course without stopping it. Text only: attachments and slash commands wait
+// for the turn's end.
+function steerMessage() {
+    const text = textarea.value.trim();
+    if (!text) return;
+    if (text.startsWith("/")) {
+        showToast("Slash commands wait for the turn to end");
+        return;
+    }
+    pushPromptHistory(text);
+    historyIndex = -1;
+    updateHistoryHint();
+    // The answer to it streams below it, in a new bubble.
+    if (currentStreamBubble) {
+        finalizeBubbleStream(currentStreamBubble);
+        currentStreamBubble = null;
+    }
+    removeLoading();
+    const message = addMessage("user", text);
+    message.classList.add("steer");
+    message.title = "Sent while Claude was working: it takes it at its next step";
+    _pendingUserAckBubble = message;
+    addLoading();
+    textarea.value = "";
+    updateTokenEstimate();
+    window.chrome.webview.postMessage({ type: "steer", text });
 }
 
 btnSend.addEventListener("click", () => {
@@ -1838,6 +1871,7 @@ btnSend.addEventListener("click", () => {
         setStreaming(false);
         removeLoading();
         removeLiveTimer();
+        clearBgTasks(); // cancel ends the claude process, its background tasks too
         if (currentStreamBubble) {
             finalizeBubbleStream(currentStreamBubble);
             const cancelled = document.createElement("span");
@@ -2267,8 +2301,12 @@ function sendMessage() {
     // A turn is already in flight (possibly still respawning claude — slow and
     // silent): a second send here queues in the agent and the answers tramples
     // the transcript (D7 validation 2026-07-16). Stop it — the user can cancel
-    // with ■ first if they really want to abandon the pending turn.
-    if (isStreaming) return;
+    // with ■ first if they really want to abandon the pending turn. Instead a
+    // message written meanwhile steers the running turn.
+    if (isStreaming) {
+        if (window.chrome?.webview) steerMessage();
+        return;
+    }
     _userScrolledUp = false;
     const text = textarea.value.trim();
     pushPromptHistory(text);
@@ -2759,6 +2797,11 @@ window.chrome.webview.addEventListener("message", event => {
         return;
     }
 
+    if (event.data.type === "background-tasks" || event.data.type === "task-progress") {
+        onBackgroundTasks(event.data);
+        return;
+    }
+
     if (event.data.type === "budget-exceeded") {
         showToast(`💸 ${event.data.detail || "Max budget reached"}`);
         return;
@@ -2776,7 +2819,10 @@ window.chrome.webview.addEventListener("message", event => {
             finalizeBubbleStream(currentStreamBubble);
             currentStreamBubble = null;
         }
-        appendSystemInfo("Claude continues on its own (background agents reported back).");
+        // "steer": a message sent while a turn ran came after its end, and
+        // starts this one; its bubble already says what it is
+        if (event.data.text !== "steer")
+            appendSystemInfo("Claude continues on its own (background agents reported back).");
         if (!isStreaming) {
             setStreaming(true);
             addLoading();
@@ -4527,6 +4573,78 @@ function appendToolEvent(kind, name, inputJson, text, id) {
     autoScroll();
 }
 
+// ── Background tasks line ────────────────────────────────────
+// Agents started with run_in_background (and backgrounded shells) go on
+// working after the turn that started them, also while the chat is idle. The
+// line above the composer lists them with their latest step, tool count and
+// time running, until claude reports the list empty.
+const bgTasks = new Map(); // task_id -> { label, step, tools, since }
+let bgTasksTimer = null;
+
+function fmtElapsed(ms) {
+    const s = Math.max(0, Math.floor(ms / 1000));
+    return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${String(s % 60).padStart(2, "0")}s`;
+}
+
+function renderBgTasks() {
+    const el = document.getElementById("bg-tasks");
+    if (!bgTasks.size) {
+        el.hidden = true;
+        el.replaceChildren();
+        clearInterval(bgTasksTimer);
+        bgTasksTimer = null;
+        return;
+    }
+    el.hidden = false;
+    el.replaceChildren(...[...bgTasks.values()].map(t => {
+        const row = document.createElement("div");
+        row.className = "bg-task";
+        const parts = [t.step, t.tools ? `${t.tools} tool${t.tools === 1 ? "" : "s"}` : "", fmtElapsed(Date.now() - t.since)];
+        row.textContent = `⏳ ${t.label} · ${parts.filter(Boolean).join(" · ")}`;
+        row.title = row.textContent;
+        return row;
+    }));
+    if (!bgTasksTimer) bgTasksTimer = setInterval(renderBgTasks, 1000);
+}
+
+function clearBgTasks() {
+    bgTasks.clear();
+    renderBgTasks();
+}
+
+function onBackgroundTasks(data) {
+    if (data.type === "background-tasks") {
+        let list = [];
+        try { list = JSON.parse(data.text || "[]"); } catch (e) { /* unexpected shape: keep the line as it is */ return; }
+        const ids = new Set(list.map(t => t.task_id));
+        for (const id of [...bgTasks.keys()]) if (!ids.has(id)) bgTasks.delete(id);
+        for (const t of list) {
+            if (bgTasks.has(t.task_id)) continue;
+            bgTasks.set(t.task_id, {
+                label: t.task_type === "local_agent"
+                    ? `${t.subagent_type || "agent"}: ${t.description || ""}`
+                    : (t.description || t.task_type || "task"),
+                step: "started", tools: 0, since: Date.now()
+            });
+        }
+    } else {
+        // task-progress; also comes for agents that are not in the background
+        const t = bgTasks.get(data.id);
+        if (!t) return;
+        // "Running <what>" for built-in tools; for MCP ones claude repeats the
+        // task's description, so the tool's name says more
+        const tool = (data.tool || "").replace(/^mcp__.*?__/, "");
+        if (data.text && !t.label.endsWith(": " + data.text) && data.text !== t.label) t.step = data.text;
+        else if (tool) t.step = "Running " + tool;
+        try {
+            const u = JSON.parse(data.input || "{}");
+            if (u.tool_uses) t.tools = u.tool_uses;
+            if (u.duration_ms) t.since = Math.min(t.since, Date.now() - u.duration_ms);
+        } catch (e) { /* no usage: the step alone */ }
+    }
+    renderBgTasks();
+}
+
 // ── Subagent live trace (#13) ────────────────────────────────
 // Program.cs always forwards --forward-subagent-text data; getSubagentDetail()
 // (off/simple/full) purely decides how much of it gets rendered here.
@@ -5083,6 +5201,7 @@ function clearChat() {
     }
     _lastReportedActiveModel = modelSelect.value; // #14: fresh chat, fresh fallback tracking
     subagentTraces.clear(); // #13: old entries would point at now-removed DOM nodes
+    clearBgTasks(); // the new session has none
     updateUsageSessionValues();
     // User explicitly asked for a fresh chat — suppress --continue on the next
     // outbound message even if the "Auto-resume" setting is on.

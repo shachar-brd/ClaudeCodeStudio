@@ -2929,6 +2929,16 @@ html.light-theme .resume-overlay-inner .dots span { color: var(--accent); }
     border-radius: 12px 12px 12px 4px;
 }
 
+/* sent while a turn ran, to steer it */
+.message.user.steer .bubble {
+    border: 1px dashed var(--text-dim, #888);
+}
+
+.message.user.steer .bubble::before {
+    content: "↪ ";
+    color: var(--text-dim, #888);
+}
+
 .welcome {
     display: flex;
     flex-direction: column;
@@ -3155,6 +3165,24 @@ html.light-theme .resume-overlay-inner .dots span { color: var(--accent); }
 
 .cost-warning {
     flex-shrink: 0;
+}
+
+.bg-tasks {
+    flex-shrink: 0;
+    padding: 4px 10px;
+    font-size: 12px;
+    border-top: 1px solid #3a3a3a;
+    color: #b8b8b8;
+}
+
+.bg-tasks[hidden] {
+    display: none;
+}
+
+.bg-task {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
 }
 
 .composer {

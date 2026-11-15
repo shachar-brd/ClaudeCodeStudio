@@ -63,6 +63,12 @@ public class ChatRequest
     // the main transcript. Forwarded back as a "side-question-result" chunk.
     public string? SideQuestion { get; set; }
 
+    // A message the user writes while a turn runs, to steer it: written to
+    // claude's stdin at once, not queued for the turn's end. claude hands it to
+    // the model at its next step (a tool result) within the same turn; if the
+    // turn ends first, it starts the next one (a background turn, Text "steer").
+    public string? Steer { get; set; }
+
     // Native file rewind: ask the running claude (with checkpointing enabled) to
     // restore files to the state before a given user message. The agent sends a
     // control_request{subtype:"rewind_files"} on claude.stdin and forwards the

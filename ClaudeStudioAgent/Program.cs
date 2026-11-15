@@ -142,6 +142,19 @@ var stdinReader = Task.Run(async () =>
                 continue;
             }
 
+            if (request.Steer != null)
+            {
+                // Mid-turn: the main loop is inside the turn, so not through it.
+                if (session == null || !session.IsAlive)
+                    EmitError("steer: no active session");
+                else
+                {
+                    try { await session.SteerAsync(request.Steer); }
+                    catch (Exception ex) { EmitError($"steer failed: {ex.Message}"); }
+                }
+                continue;
+            }
+
             if (request.CancelTurn)
             {
                 // Unblock any hook still waiting on a permission decision FIRST:
@@ -1316,6 +1329,29 @@ Every tool call here has a fixed overhead of a few seconds (security hooks run b
         finally { _stdinLock.Release(); }
     }
 
+    private string UserMessageJson(string text) => JsonSerializer.Serialize(new
+    {
+        type = "user",
+        message = new { role = "user", content = text },
+        parent_tool_use_id = (string?)null,
+        session_id = SessionId ?? ""
+    });
+
+    // A message for the running turn (see ChatRequest.Steer): no turn lock, the
+    // turn's reader goes on and reads what claude makes of it.
+    public async Task SteerAsync(string userText)
+    {
+        if (_stdin == null) throw new InvalidOperationException("session not started");
+        await _stdinLock.WaitAsync();
+        try
+        {
+            await _stdin.WriteLineAsync(UserMessageJson(userText));
+            await _stdin.FlushAsync();
+        }
+        finally { _stdinLock.Release(); }
+        EmitTiming("steering message sent", 0);
+    }
+
     public async Task SendMessageAsync(string userText)
     {
         if (_stdin == null || _stdout == null || _proc == null || _proc.HasExited)
@@ -1328,15 +1364,7 @@ Every tool call here has a fixed overhead of a few seconds (security hooks run b
         try
         {
             var sw = Stopwatch.StartNew();
-
-            var userMsg = new
-            {
-                type = "user",
-                message = new { role = "user", content = userText },
-                parent_tool_use_id = (string?)null,
-                session_id = SessionId ?? ""
-            };
-            var ndjson = JsonSerializer.Serialize(userMsg);
+            var ndjson = UserMessageJson(userText);
 
             await _stdinLock.WaitAsync();
             try
@@ -1388,8 +1416,9 @@ Every tool call here has a fixed overhead of a few seconds (security hooks run b
 
     // Between requests: what nobody is reading is claude's own. A turn it
     // starts by itself (background agents finishing, their results coming in)
-    // is forwarded as a background turn; other events (subagent progress,
-    // rate limits) are dropped, as no turn waits for them.
+    // is forwarded as a background turn. Of the other events the background
+    // agents' progress is forwarded as it comes, outside any turn, so the chat
+    // shows them working; the rest (rate limits, task bookkeeping) is dropped.
     private async Task ReadIdleAsync(ChannelReader<JsonElement> events)
     {
         try
@@ -1400,7 +1429,10 @@ Every tool call here has a fixed overhead of a few seconds (security hooks run b
                 try
                 {
                     while (events.TryPeek(out var evt) && !StreamEventParser.StartsTurn(evt))
+                    {
                         events.TryRead(out _);
+                        ForwardIdleProgress(evt);
+                    }
                     if (events.TryPeek(out _))
                         await ReadTurnAsync(Stopwatch.StartNew(), 0, background: true);
                 }
@@ -1410,6 +1442,17 @@ Every tool call here has a fixed overhead of a few seconds (security hooks run b
         catch (Exception ex)
         {
             EmitError($"background turn reader failed: {ex.Message}");
+        }
+    }
+
+    private void ForwardIdleProgress(JsonElement evt)
+    {
+        var state = new StreamEventState { SessionId = SessionId, LastActiveModel = _lastActiveModel };
+        foreach (var chunk in StreamEventParser.Process(evt, state, 0, _workingDirectory, ExpectedCliPermissionMode(), _permissionMode).Chunks)
+        {
+            if (!StreamEventParser.IsIdleProgress(chunk)) continue;
+            Console.WriteLine(JsonSerializer.Serialize(chunk));
+            Console.Out.Flush();
         }
     }
 
@@ -1433,8 +1476,13 @@ Every tool call here has a fixed overhead of a few seconds (security hooks run b
 
         if (background)
         {
-            Emit(new ChatChunk { Type = "background-turn" });
-            EmitTiming("background turn: claude continues on its own (background agents)", 0);
+            // Opened by the echo (--replay-user-messages) of a steering message
+            // that came after the turn it was for had ended, or by claude itself.
+            var steer = _events != null && _events.Reader.TryPeek(out var first) &&
+                first.TryGetProperty("isReplay", out var replay) && replay.ValueKind == JsonValueKind.True;
+            Emit(new ChatChunk { Type = "background-turn", Text = steer ? "steer" : "" });
+            EmitTiming(steer ? "background turn: the steering message, after its turn ended"
+                : "background turn: claude continues on its own (background agents)", 0);
         }
 
         bool firstLine = true;

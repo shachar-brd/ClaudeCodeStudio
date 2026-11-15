@@ -24,8 +24,10 @@ public sealed class TurnCallbacks
     public Action<string, string>? OnDiagnosticsRequest { get; set; }
     public Action<string>? OnThinking { get; set; }
     public Action<ChatChunk>? OnSubagentEvent { get; set; }
+    public Action<ChatChunk>? OnBackgroundTasks { get; set; }
     public Action<string, string>? OnPermissionResolved { get; set; }
-    public Action? OnBackgroundStart { get; set; }
+    // "steer" when a steering message opened it, else ""
+    public Action<string>? OnBackgroundStart { get; set; }
     public Action? OnBackgroundEnd { get; set; }
 }
 
@@ -185,6 +187,21 @@ public class AgentClient
         var reader = _reader;
         _ = Task.Run(() => PumpAgentLinesAsync(reader, lines));
         _ = Task.Run(() => ReadIdleAsync(lines));
+    }
+
+    // A message for the turn running now (ChatRequest.Steer). False when there
+    // is no agent to take it.
+    public async Task<bool> SteerAsync(string text)
+    {
+        if (_writer == null)
+        {
+            OutputLog.Warn("steer dropped — agent not running");
+            return false;
+        }
+        OutputLog.Info($"steer → bytes={text.Length}");
+        await _writer.WriteLineAsync(JsonSerializer.Serialize(new ChatRequest { Message = "", Steer = text }));
+        await _writer.FlushAsync();
+        return true;
     }
 
     public async Task SendPermissionResponseAsync(string toolUseId, bool allow, string? reason, string? allowSession = null)
@@ -844,6 +861,14 @@ public class AgentClient
             return;
         }
 
+        // Background tasks running and their steps, also between turns. A
+        // request's callbacks have no handler for them: the background ones do.
+        if (chunk.Type is "background-tasks" or "task-progress")
+        {
+            (cb.OnBackgroundTasks ?? BackgroundCallbacks?.OnBackgroundTasks)?.Invoke(chunk);
+            return;
+        }
+
         // #11: same sentinel-on-onChunk trick as CLAUDE_NOT_FOUND:: below —
         // a terminal, turn-ending condition that needs distinct UI treatment
         // (not a new callback param, not a plain chat error bubble).
@@ -1000,10 +1025,11 @@ public class AgentClient
         var cb = BackgroundCallbacks;
         if (chunk.Type == "background-turn")
         {
-            OutputLog.Info("background turn: claude continues on its own (background agents)");
+            OutputLog.Info(chunk.Text == "steer" ? "background turn: the steering message, after its turn ended"
+                : "background turn: claude continues on its own (background agents)");
             _backgroundActive = true;
             _backgroundCancelled = false;
-            cb?.OnBackgroundStart?.Invoke();
+            cb?.OnBackgroundStart?.Invoke(chunk.Text);
             return;
         }
         if (chunk.Type == "done")
@@ -1028,7 +1054,7 @@ public class AgentClient
 
     private void HandleStrayChunk(ChatChunk chunk)
     {
-        if (!StrayChunkTypes.Contains(chunk.Type))
+        if (!StrayChunkTypes.Contains(chunk.Type) && !StreamEventParser.IsIdleProgress(chunk))
         {
             OutputLog.Info($"agent output between requests ignored: {chunk.Type}");
             return;

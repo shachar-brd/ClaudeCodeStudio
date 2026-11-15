@@ -1413,6 +1413,17 @@ public partial class AgentToolWindowControl : UserControl
                 return;
             }
 
+            // Written while a turn runs: straight to the agent, for that turn.
+            if (request.Type == "steer")
+            {
+                OutputLog.Info("ui: steer");
+                if (string.IsNullOrWhiteSpace(request.Text) || !await _agentClient.SteerAsync(request.Text!))
+                    System.Windows.Application.Current.Dispatcher.Invoke(() =>
+                        Browser.CoreWebView2.PostWebMessageAsJson(
+                            JsonSerializer.Serialize(new { type = "system-info", text = "The message could not be sent: the agent is not running." })));
+                return;
+            }
+
             if (request.Type == "cancel")
             {
                 OutputLog.Info("ui: cancel");
@@ -1861,10 +1872,10 @@ public partial class AgentToolWindowControl : UserControl
             // A turn claude starts by itself later (background agents finishing)
             // renders like this one, as a new answer.
             var background = BuildTurnCallbacks(dispatcher);
-            background.OnBackgroundStart = () => dispatcher.Invoke(() =>
+            background.OnBackgroundStart = reason => dispatcher.Invoke(() =>
             {
                 VsStatusBar.ShowThinking();
-                Browser.CoreWebView2.PostWebMessageAsJson(JsonSerializer.Serialize(new { type = "background-turn" }));
+                Browser.CoreWebView2.PostWebMessageAsJson(JsonSerializer.Serialize(new { type = "background-turn", text = reason }));
             });
             background.OnBackgroundEnd = () => dispatcher.Invoke(() =>
             {
@@ -2016,20 +2027,24 @@ public partial class AgentToolWindowControl : UserControl
             Browser.CoreWebView2.PostWebMessageAsJson(
                 JsonSerializer.Serialize(new { type = "permission_resolved", id, reason }))),
         OnDiagnosticsRequest = (filePath, requestId) => _ = HandleDiagnosticsRequestAsync(filePath, requestId),
-        OnSubagentEvent = sc => dispatcher.Invoke(() =>
-            Browser.CoreWebView2.PostWebMessageAsJson(
-                JsonSerializer.Serialize(new
-                {
-                    type = sc.Type,
-                    text = sc.Text,
-                    tool = sc.Tool,
-                    input = sc.ToolInput,
-                    id = sc.ToolId,
-                    parentId = sc.ParentToolId,
-                    subagentType = sc.SubagentType,
-                    taskDescription = sc.TaskDescription
-                })))
+        OnSubagentEvent = sc => PostAgentEvent(dispatcher, sc),
+        // the background tasks line: the same fields
+        OnBackgroundTasks = sc => PostAgentEvent(dispatcher, sc)
     };
+
+    private void PostAgentEvent(System.Windows.Threading.Dispatcher dispatcher, ClaudeStudioShared.ChatChunk sc) => dispatcher.Invoke(() =>
+        Browser.CoreWebView2.PostWebMessageAsJson(
+            JsonSerializer.Serialize(new
+            {
+                type = sc.Type,
+                text = sc.Text,
+                tool = sc.Tool,
+                input = sc.ToolInput,
+                id = sc.ToolId,
+                parentId = sc.ParentToolId,
+                subagentType = sc.SubagentType,
+                taskDescription = sc.TaskDescription
+            })));
 
     private async Task HandleExportMarkdownAsync(string? content)
     {

@@ -83,6 +83,14 @@ public static class StreamEventParser
         return result;
     }
 
+    private static string? Str(JsonElement e, string name) =>
+        e.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() : null;
+
+    // What the agent forwards of the events it reads between turns, nobody's
+    // turn: the background agents' progress (live in the chat while it is idle).
+    public static bool IsIdleProgress(ChatChunk chunk) =>
+        chunk.Type is "background-tasks" or "task-progress" || chunk.Type.StartsWith("subagent-", StringComparison.Ordinal);
+
     private static void ProcessSystem(
         JsonElement evt, StreamEventState state, long elapsedMs,
         string expectedCliPermissionMode, string requestedPermissionMode, StreamEventResult result)
@@ -115,6 +123,31 @@ public static class StreamEventParser
         {
             if (evt.TryGetProperty("compact_metadata", out var compactMetaEl))
                 result.Chunks.Add(new ChatChunk { Type = "compact-boundary", Text = compactMetaEl.GetRawText() });
+            return;
+        }
+        // The background tasks running now (agents started with
+        // run_in_background, backgrounded shells): the whole list, [] when none.
+        if (subtypeStr == "background_tasks_changed")
+        {
+            if (evt.TryGetProperty("tasks", out var tasksEl) && tasksEl.ValueKind == JsonValueKind.Array)
+                result.Chunks.Add(new ChatChunk { Type = "background-tasks", Text = tasksEl.GetRawText() });
+            return;
+        }
+        // An agent's step: Text "Running <what>", ToolInput its usage so far
+        // ({total_tokens, tool_uses, duration_ms}), ToolId the task id,
+        // ParentToolId the Agent tool_use that started it.
+        if (subtypeStr == "task_progress")
+        {
+            result.Chunks.Add(new ChatChunk
+            {
+                Type = "task-progress",
+                Text = Str(evt, "description") ?? "",
+                Tool = Str(evt, "last_tool_name"),
+                ToolInput = evt.TryGetProperty("usage", out var usageEl) && usageEl.ValueKind == JsonValueKind.Object ? usageEl.GetRawText() : null,
+                ToolId = Str(evt, "task_id"),
+                ParentToolId = Str(evt, "tool_use_id"),
+                SubagentType = Str(evt, "subagent_type")
+            });
             return;
         }
         if (subtypeStr != "init") return;

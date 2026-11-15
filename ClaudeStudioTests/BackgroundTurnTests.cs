@@ -30,6 +30,43 @@ public class BackgroundTurnTests
     public void StartsTurn_not_for_subagent_or_idle_events(string json) =>
         Assert.False(StreamEventParser.StartsTurn(Evt(json)));
 
+    private static List<ChatChunk> Parse(string json) =>
+        StreamEventParser.Process(Evt(json), new StreamEventState(), 0, null, "default", "ask").Chunks;
+
+    [Fact]
+    public void Background_tasks_list_becomes_a_chunk_with_the_list()
+    {
+        var chunks = Parse("""{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"a2","task_type":"local_agent","subagent_type":"Explore","description":"pong"}]}""");
+        var c = Assert.Single(chunks);
+        Assert.Equal("background-tasks", c.Type);
+        Assert.Equal("a2", JsonSerializer.Deserialize<JsonElement>(c.Text)[0].GetProperty("task_id").GetString());
+        Assert.True(StreamEventParser.IsIdleProgress(c));
+        Assert.Equal("[]", Assert.Single(Parse("""{"type":"system","subtype":"background_tasks_changed","tasks":[]}""")).Text);
+    }
+
+    [Fact]
+    public void Task_progress_carries_step_tool_usage_and_ids()
+    {
+        var c = Assert.Single(Parse("""{"type":"system","subtype":"task_progress","task_id":"a2","tool_use_id":"toolu_1","description":"Running Sleep","subagent_type":"general-purpose","usage":{"total_tokens":11753,"tool_uses":1,"duration_ms":2480},"last_tool_name":"Bash"}"""));
+        Assert.Equal("task-progress", c.Type);
+        Assert.Equal("Running Sleep", c.Text);
+        Assert.Equal("Bash", c.Tool);
+        Assert.Equal("a2", c.ToolId);
+        Assert.Equal("toolu_1", c.ParentToolId);
+        Assert.Equal(1, JsonSerializer.Deserialize<JsonElement>(c.ToolInput!).GetProperty("tool_uses").GetInt32());
+        Assert.True(StreamEventParser.IsIdleProgress(c));
+    }
+
+    [Theory]
+    [InlineData("subagent-tool_use", true)]
+    [InlineData("subagent-text", true)]
+    [InlineData("chunk", false)]
+    [InlineData("done", false)]
+    [InlineData("session", false)]
+    [InlineData("tokens-live", false)]
+    public void Only_progress_is_forwarded_between_turns(string type, bool forwarded) =>
+        Assert.Equal(forwarded, StreamEventParser.IsIdleProgress(new ChatChunk { Type = type }));
+
     [Fact]
     public void Background_flag_is_left_out_of_normal_chunks_round_trip()
     {
